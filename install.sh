@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  HostPanel — Bare Metal Installer
-#  Supports: Ubuntu 22.04 / 24.04, Debian 11 / 12
+#  Supports: Ubuntu 20.04 / 22.04 / 24.04, Debian 11 / 12 / 13+
 #
 #  Usage:
 #    curl -fsSL https://your-server/install.sh | bash
@@ -52,7 +52,7 @@ HP_JWT_SECRET="$(openssl rand -base64 48 | tr -d '=+/')"
 HP_SESSION_SECRET="$(openssl rand -base64 48 | tr -d '=+/')"
 HP_DOMAIN="${HP_DOMAIN:-}"
 
-REPO_URL="${HP_REPO_URL:-https://github.com/your-org/hostpanel}"   # adjust before publishing
+REPO_URL="${HP_REPO_URL:-https://github.com/jacksonm36/CMS}"
 REPO_BRANCH="${HP_REPO_BRANCH:-main}"
 
 # ─── Banner ───────────────────────────────────────────────────────────────────
@@ -85,22 +85,61 @@ fi
 
 case "$OS_ID" in
   ubuntu)
-    [[ "$OS_VERSION" =~ ^(22\.04|24\.04)$ ]] || warn "Ubuntu $OS_VERSION is not officially tested. Proceeding anyway."
     PKG_MGR="apt-get"
+    IS_UBUNTU=true
+    IS_DEBIAN=false
     ;;
   debian)
-    [[ "$OS_VERSION" =~ ^(11|12)$ ]] || warn "Debian $OS_VERSION is not officially tested. Proceeding anyway."
     PKG_MGR="apt-get"
+    IS_UBUNTU=false
+    IS_DEBIAN=true
+    ;;
+  raspbian)
+    PKG_MGR="apt-get"
+    IS_UBUNTU=false
+    IS_DEBIAN=true
+    OS_ID="debian"
     ;;
   *)
-    error "Unsupported OS: $OS_ID $OS_VERSION. HostPanel supports Ubuntu 22.04/24.04 and Debian 11/12."
+    error "Unsupported OS: $OS_ID. HostPanel supports Ubuntu and Debian-based systems."
     ;;
 esac
+
+# Resolve codename — some minimal installs omit VERSION_CODENAME
+if [[ -z "$OS_CODENAME" ]]; then
+  OS_CODENAME="$(lsb_release -cs 2>/dev/null || echo "")"
+fi
+# Fallback map for known Debian versions without a codename
+if [[ -z "$OS_CODENAME" && "$IS_DEBIAN" == "true" ]]; then
+  case "$OS_VERSION" in
+    11) OS_CODENAME="bullseye" ;;
+    12) OS_CODENAME="bookworm" ;;
+    13) OS_CODENAME="trixie" ;;
+    14) OS_CODENAME="forky" ;;
+    *)  OS_CODENAME="$(lsb_release -cs 2>/dev/null || echo "trixie")" ;;
+  esac
+fi
 
 success "Detected: $PRETTY_NAME"
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 pkg_install() {
+  # Install only packages that exist — skip missing ones with a warning
+  local to_install=()
+  for pkg in "$@"; do
+    if apt-cache show "$pkg" &>/dev/null 2>&1; then
+      to_install+=("$pkg")
+    else
+      warn "Package '$pkg' not found in apt cache — skipping"
+    fi
+  done
+  if [[ ${#to_install[@]} -gt 0 ]]; then
+    DEBIAN_FRONTEND=noninteractive $PKG_MGR install -y --no-install-recommends "${to_install[@]}"
+  fi
+}
+
+pkg_install_required() {
+  # Install packages that MUST succeed — error if any fail
   DEBIAN_FRONTEND=noninteractive $PKG_MGR install -y --no-install-recommends "$@"
 }
 
@@ -121,9 +160,22 @@ wait_for_port() {
 step "Updating package lists and installing core dependencies"
 
 $PKG_MGR update -qq
-pkg_install curl wget gnupg lsb-release ca-certificates \
-  build-essential git unzip openssl netcat-openbsd \
-  software-properties-common apt-transport-https
+
+# Universal core — available on all supported distros
+pkg_install_required curl wget gnupg2 lsb-release ca-certificates \
+  build-essential git unzip openssl
+
+# Netcat — package name differs by distro
+pkg_install netcat-openbsd || pkg_install netcat-traditional || true
+
+# apt-transport-https is a no-op stub on Debian 12+ / Ubuntu 22+ (built into apt)
+# but install it if available for older systems
+pkg_install apt-transport-https || true
+
+# software-properties-common is Ubuntu-only (provides add-apt-repository)
+if [[ "$IS_UBUNTU" == "true" ]]; then
+  pkg_install software-properties-common || true
+fi
 
 success "Core dependencies installed"
 
@@ -133,9 +185,10 @@ step "Installing Node.js $HP_NODE_VERSION LTS"
 if command -v node &>/dev/null && node --version | grep -q "^v${HP_NODE_VERSION}"; then
   success "Node.js $(node --version) already installed"
 else
+  # NodeSource setup script handles Ubuntu + Debian, including trixie
   curl -fsSL "https://deb.nodesource.com/setup_${HP_NODE_VERSION}.x" | bash -
-  pkg_install nodejs
-  npm install -g npm@latest
+  pkg_install_required nodejs
+  npm install -g npm@latest 2>/dev/null || true
   success "Node.js $(node --version) installed"
 fi
 
@@ -146,10 +199,12 @@ if ! command -v psql &>/dev/null; then
   curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
     | gpg --dearmor -o /usr/share/keyrings/postgresql.gpg
   echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] \
-    https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+    https://apt.postgresql.org/pub/repos/apt ${OS_CODENAME}-pgdg main" \
     > /etc/apt/sources.list.d/pgdg.list
   $PKG_MGR update -qq
-  pkg_install postgresql-16 postgresql-client-16
+  # Try PG16, fall back to PG15 if not yet in the pgdg repo for this codename
+  pkg_install postgresql-16 postgresql-client-16 \
+    || pkg_install_required postgresql postgresql-client
 fi
 
 service_enable_start postgresql
@@ -174,13 +229,15 @@ success "PostgreSQL ready"
 step "Installing Redis 7"
 
 if ! command -v redis-server &>/dev/null; then
-  curl -fsSL https://packages.redis.io/gpg \
-    | gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg
-  echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] \
-    https://packages.redis.io/deb $(lsb_release -cs) main" \
-    > /etc/apt/sources.list.d/redis.list
-  $PKG_MGR update -qq
-  pkg_install redis-server
+  # Redis official repo may not yet carry trixie; fall back to distro package if unavailable
+  if curl -fsSL https://packages.redis.io/gpg 2>/dev/null \
+      | gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg 2>/dev/null; then
+    echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] \
+      https://packages.redis.io/deb ${OS_CODENAME} main" \
+      > /etc/apt/sources.list.d/redis.list
+    $PKG_MGR update -qq 2>/dev/null || true
+  fi
+  pkg_install redis-server || pkg_install_required redis
 fi
 
 # Configure Redis
@@ -249,22 +306,35 @@ fi
 step "Installing PHP 8.2 FPM (optional, for PHP site support)"
 
 if ! command -v php &>/dev/null; then
-  # ondrej/php PPA for Ubuntu; SURY for Debian
-  if [[ "$OS_ID" == "ubuntu" ]]; then
+  # ondrej/php PPA for Ubuntu (requires software-properties-common + add-apt-repository)
+  # sury.org for Debian (all versions including trixie)
+  if [[ "$IS_UBUNTU" == "true" ]] && command -v add-apt-repository &>/dev/null; then
     add-apt-repository -y ppa:ondrej/php
   else
-    curl -sSL https://packages.sury.org/php/apt.gpg \
+    # sury.org supports all current Debian releases
+    curl -sSL https://packages.sury.org/php/apt.gpg 2>/dev/null \
       | gpg --dearmor -o /usr/share/keyrings/sury-php.gpg
     echo "deb [signed-by=/usr/share/keyrings/sury-php.gpg] \
-      https://packages.sury.org/php $(lsb_release -cs) main" \
+      https://packages.sury.org/php ${OS_CODENAME} main" \
       > /etc/apt/sources.list.d/sury-php.list
   fi
-  $PKG_MGR update -qq
-  pkg_install php8.2-fpm php8.2-cli php8.2-mbstring php8.2-xml \
-    php8.2-curl php8.2-zip php8.2-pgsql php8.2-mysql php8.2-gd php8.2-intl \
-    php8.2-bcmath php8.2-opcache
-  service_enable_start php8.2-fpm
-  success "PHP 8.2 FPM installed"
+  $PKG_MGR update -qq 2>/dev/null || true
+
+  # Try PHP 8.2; fall back to distro-default php-fpm if sury not available yet
+  if apt-cache show php8.2-fpm &>/dev/null 2>&1; then
+    pkg_install_required php8.2-fpm php8.2-cli php8.2-mbstring php8.2-xml \
+      php8.2-curl php8.2-zip php8.2-pgsql php8.2-mysql php8.2-gd php8.2-intl \
+      php8.2-bcmath php8.2-opcache
+    service_enable_start php8.2-fpm
+  else
+    warn "PHP 8.2 not available for ${OS_CODENAME} yet — installing distro default PHP"
+    pkg_install php-fpm php-cli php-mbstring php-xml php-curl php-zip \
+      php-pgsql php-mysql php-gd php-intl php-bcmath php-opcache || true
+    PHP_FPM_SVC="$(systemctl list-unit-files 'php*-fpm.service' --no-legend 2>/dev/null \
+      | awk '{print $1}' | head -1)"
+    [[ -n "$PHP_FPM_SVC" ]] && service_enable_start "$PHP_FPM_SVC" || true
+  fi
+  success "PHP $(php --version 2>/dev/null | head -1 | cut -d' ' -f2) FPM installed"
 else
   success "PHP $(php --version | head -1 | cut -d' ' -f2) already installed"
 fi
@@ -274,8 +344,12 @@ if [[ "$HP_CROWDSEC" == "true" ]]; then
   step "Installing CrowdSec"
 
   if ! command -v cscli &>/dev/null; then
-    curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | bash
-    pkg_install crowdsec crowdsec-firewall-bouncer-iptables
+    # CrowdSec official repo setup — works on Debian/Ubuntu including trixie
+    curl -s https://install.crowdsec.net | bash 2>/dev/null \
+      || curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | bash
+    $PKG_MGR update -qq 2>/dev/null || true
+    pkg_install crowdsec || pkg_install_required crowdsec
+    pkg_install crowdsec-firewall-bouncer-iptables || true
     service_enable_start crowdsec
 
     # Install community-recommended collections
@@ -535,6 +609,11 @@ fi
 
 # ─── 14. Firewall ─────────────────────────────────────────────────────────────
 step "Configuring firewall (ufw)"
+
+# ufw is not pre-installed on Debian — install it silently
+if ! command -v ufw &>/dev/null; then
+  pkg_install ufw || true
+fi
 
 if command -v ufw &>/dev/null; then
   ufw --force reset
