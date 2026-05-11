@@ -1,0 +1,364 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Users & Auth ─────────────────────────────────────────────────────────────
+
+model User {
+  id              String    @id @default(cuid())
+  email           String    @unique
+  name            String?
+  passwordHash    String?
+  role            Role      @default(viewer)
+  twoFactorEnabled Boolean  @default(false)
+  totpSecret      String?
+  oauthProvider   String?
+  oauthId         String?
+  avatarUrl       String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  sites           Site[]
+  apiKeys         ApiKey[]
+  auditLogs       AuditLog[]
+  contentEntries  ContentEntry[]
+  mediaFiles      MediaFile[]
+
+  @@index([email])
+  @@map("users")
+}
+
+enum Role {
+  superadmin
+  admin
+  editor
+  viewer
+}
+
+// ─── Sites ────────────────────────────────────────────────────────────────────
+
+model Site {
+  id                  String      @id @default(cuid())
+  name                String
+  domain              String      @unique
+  ownerId             String
+  status              SiteStatus  @default(pending)
+  type                SiteType    @default(static)
+  webServer           WebServer   @default(nginx)
+  phpVersion          String?
+  dockerContainerId   String?
+  rootPath            String
+  webConfigPath       String?
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
+
+  owner               User        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  databases           SiteDatabase[]
+  cronJobs            CronJob[]
+  sslCert             SslCert?
+  webhooks            Webhook[]
+
+  @@index([ownerId])
+  @@index([domain])
+  @@map("sites")
+}
+
+enum WebServer {
+  nginx
+  apache2
+  lighttpd
+  litespeed
+}
+
+enum SiteStatus {
+  active
+  suspended
+  pending
+  error
+}
+
+enum SiteType {
+  php
+  static
+  nodejs
+  python
+}
+
+model SiteDatabase {
+  id        String   @id @default(cuid())
+  siteId    String
+  name      String
+  engine    DbEngine
+  host      String   @default("localhost")
+  port      Int
+  username  String
+  passwordHash String
+  createdAt DateTime @default(now())
+
+  site      Site     @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@index([siteId])
+  @@map("site_databases")
+}
+
+enum DbEngine {
+  postgresql
+  mysql
+}
+
+model CronJob {
+  id          String    @id @default(cuid())
+  siteId      String
+  name        String
+  schedule    String
+  command     String
+  enabled     Boolean   @default(true)
+  lastRunAt   DateTime?
+  lastExitCode Int?
+  lastOutput  String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  site        Site      @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@index([siteId])
+  @@map("cron_jobs")
+}
+
+// ─── SSL ──────────────────────────────────────────────────────────────────────
+
+model SslCert {
+  id          String     @id @default(cuid())
+  siteId      String     @unique
+  domain      String
+  status      CertStatus @default(pending)
+  issuedAt    DateTime?
+  expiresAt   DateTime?
+  autoRenew   Boolean    @default(true)
+  provider    String     @default("letsencrypt")
+  certPath    String?
+  keyPath     String?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  site        Site       @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@index([domain])
+  @@map("ssl_certs")
+}
+
+enum CertStatus {
+  valid
+  expiring
+  expired
+  pending
+  error
+}
+
+// ─── Security ─────────────────────────────────────────────────────────────────
+
+model FirewallRule {
+  id          String    @id @default(cuid())
+  direction   String    @default("inbound")
+  protocol    String    @default("tcp")
+  port        String?
+  sourceIp    String?
+  action      String    @default("allow")
+  priority    Int       @default(100)
+  description String    @default("")
+  enabled     Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@map("firewall_rules")
+}
+
+model BlockedIp {
+  id          String    @id @default(cuid())
+  ip          String    @unique
+  reason      String
+  blockedAt   DateTime  @default(now())
+  expiresAt   DateTime?
+  permanent   Boolean   @default(false)
+
+  @@index([ip])
+  @@map("blocked_ips")
+}
+
+model AuditLog {
+  id            String    @id @default(cuid())
+  userId        String?
+  userEmail     String?
+  action        String
+  resourceType  String
+  resourceId    String?
+  ip            String
+  userAgent     String?
+  meta          Json      @default("{}")
+  createdAt     DateTime  @default(now())
+
+  user          User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([createdAt])
+  @@index([resourceType, resourceId])
+  @@map("audit_logs")
+}
+
+// ─── Integrations ─────────────────────────────────────────────────────────────
+
+model ApiKey {
+  id            String    @id @default(cuid())
+  userId        String
+  name          String
+  keyHash       String    @unique
+  keyPrefix     String
+  scopes        String[]
+  lastUsedAt    DateTime?
+  expiresAt     DateTime?
+  createdAt     DateTime  @default(now())
+
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([keyHash])
+  @@map("api_keys")
+}
+
+model Webhook {
+  id              String    @id @default(cuid())
+  siteId          String?
+  name            String
+  url             String
+  events          String[]
+  secret          String?
+  enabled         Boolean   @default(true)
+  lastCalledAt    DateTime?
+  lastStatusCode  Int?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  site            Site?     @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@index([siteId])
+  @@map("webhooks")
+}
+
+model Integration {
+  id        String   @id @default(cuid())
+  provider  String
+  name      String
+  config    Json     @default("{}")
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([provider])
+  @@map("integrations")
+}
+
+// ─── Content ──────────────────────────────────────────────────────────────────
+
+model ContentType {
+  id        String    @id @default(cuid())
+  name      String
+  slug      String    @unique
+  schema    Json      @default("[]")
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  entries   ContentEntry[]
+
+  @@map("content_types")
+}
+
+model ContentEntry {
+  id        String    @id @default(cuid())
+  typeId    String
+  data      Json      @default("{}")
+  published Boolean   @default(false)
+  authorId  String
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  type      ContentType @relation(fields: [typeId], references: [id], onDelete: Cascade)
+  author    User        @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([typeId])
+  @@index([authorId])
+  @@map("content_entries")
+}
+
+model MediaFile {
+  id            String    @id @default(cuid())
+  name          String
+  originalName  String
+  mimeType      String
+  size          Int
+  url           String
+  thumbnailUrl  String?
+  storagePath   String
+  uploadedBy    String
+  createdAt     DateTime  @default(now())
+
+  uploader      User      @relation(fields: [uploadedBy], references: [id], onDelete: Cascade)
+
+  @@index([uploadedBy])
+  @@map("media_files")
+}
+
+// ─── Monitoring ───────────────────────────────────────────────────────────────
+
+model UptimeCheck {
+  id              String    @id @default(cuid())
+  name            String
+  url             String
+  interval        Int       @default(60)
+  timeout         Int       @default(10)
+  enabled         Boolean   @default(true)
+  lastStatus      String    @default("unknown")
+  lastCheckedAt   DateTime?
+  lastResponseMs  Int?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  results         UptimeResult[]
+
+  @@map("uptime_checks")
+}
+
+model UptimeResult {
+  id          String    @id @default(cuid())
+  checkId     String
+  status      String
+  responseMs  Int?
+  statusCode  Int?
+  error       String?
+  checkedAt   DateTime  @default(now())
+
+  check       UptimeCheck @relation(fields: [checkId], references: [id], onDelete: Cascade)
+
+  @@index([checkId, checkedAt])
+  @@map("uptime_results")
+}
+
+model AlertRule {
+  id              String    @id @default(cuid())
+  name            String
+  metric          String
+  threshold       Float
+  operator        String
+  windowMinutes   Int       @default(5)
+  notifyVia       String[]
+  enabled         Boolean   @default(true)
+  lastTriggeredAt DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@map("alert_rules")
+}

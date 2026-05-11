@@ -1,0 +1,71 @@
+import type { Site } from "@hostpanel/db";
+
+export const APACHE_SITES_DIR = process.env.APACHE_SITES_DIR ?? "/etc/apache2/sites-enabled";
+export const APACHE_LOG_DIR = process.env.APACHE_LOG_DIR ?? "/var/log/apache2";
+
+export function generateConfig(site: Site): string {
+  const phpVersion = site.phpVersion ?? "8.2";
+
+  // PHP via mod_php or FPM proxy
+  const phpFpmBlock = site.type === "php" ? `
+    # PHP-FPM via proxy
+    <FilesMatch "\\.php$">
+        SetHandler "proxy:unix:/run/php/php${phpVersion}-fpm.sock|fcgi://localhost"
+    </FilesMatch>` : "";
+
+  // Node.js reverse proxy
+  const proxyBlock = site.type === "nodejs" ? `
+    ProxyPreserveHost On
+    ProxyPass        / http://localhost:3000/
+    ProxyPassReverse / http://localhost:3000/` : "";
+
+  return `# HostPanel — managed by hostpanel (apache2)
+<VirtualHost *:80>
+    ServerName   ${site.domain}
+    ServerAlias  www.${site.domain}
+    DocumentRoot ${site.rootPath}
+
+    <Directory ${site.rootPath}>
+        Options -Indexes +FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+
+    # Security headers
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-XSS-Protection "1; mode=block"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+
+    # Deny hidden files
+    <FilesMatch "^\\.">
+        Require all denied
+    </FilesMatch>
+    ${phpFpmBlock}
+    ${proxyBlock}
+
+    # Compression
+    <IfModule mod_deflate.c>
+        AddOutputFilterByType DEFLATE text/plain text/html text/css application/javascript application/json
+    </IfModule>
+
+    ErrorLog  ${APACHE_LOG_DIR}/${site.domain}.error.log
+    CustomLog ${APACHE_LOG_DIR}/${site.domain}.access.log combined
+</VirtualHost>
+`;
+}
+
+export function configPath(domain: string): string {
+  return `${APACHE_SITES_DIR}/${domain}.conf`;
+}
+
+export async function reload(): Promise<void> {
+  const { exec } = await import("child_process");
+  const { promisify } = await import("util");
+  const execAsync = promisify(exec);
+  try {
+    await execAsync("apachectl configtest && apachectl graceful");
+  } catch (err) {
+    console.warn("[apache2] Could not reload:", (err as Error).message);
+  }
+}

@@ -1,0 +1,51 @@
+# Dependencies
+node_modules
+.pnp
+.pnp.js
+
+# Build outputs
+.next
+dist
+build
+out
+
+# Environment — never commit secrets
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Turbo
+.turbo
+
+# Prisma generated client
+packages/db/node_modules
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Runtime generated (bare metal)
+certs/
+uploads/
+logs/
+
+# SSL certs
+apps/api/certs
+
+# Plugin uploads
+apps/api/plugins/*/
+!apps/api/plugins/.gitkeep
