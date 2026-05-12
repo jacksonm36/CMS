@@ -8,6 +8,8 @@ export interface User {
   name: string | null;
   role: Role;
   twoFactorEnabled: boolean;
+  /** Non-staff: allows Docker panel when true. Admins/superadmins always have Docker UI access. */
+  dockerAccess?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -19,8 +21,17 @@ export interface AuthSession {
 }
 
 // ─── Sites ────────────────────────────────────────────────────────────────────
+export type WebServerType =
+  | "nginx"
+  | "apache2"
+  | "lighttpd"
+  | "litespeed"
+  | "caddy"
+  | "openresty"
+  | "traefik";
+
 export type SiteStatus = "active" | "suspended" | "pending" | "error";
-export type PhpVersion = "8.0" | "8.1" | "8.2" | "8.3";
+export type PhpVersion = "8.0" | "8.1" | "8.2" | "8.3" | "8.4";
 export type SiteType = "php" | "static" | "nodejs" | "python";
 
 export interface Site {
@@ -30,7 +41,13 @@ export interface Site {
   ownerId: string;
   status: SiteStatus;
   type: SiteType;
+  webServer?: WebServerType;
   phpVersion: PhpVersion | null;
+  nodeVersion: string | null;
+  pythonVersion: string | null;
+  dbStackVersion: string | null;
+  appProxyPort: number | null;
+  webConfigPath?: string | null;
   dockerContainerId: string | null;
   rootPath: string;
   createdAt: string;
@@ -213,11 +230,11 @@ export interface AlertRule {
   windowMinutes: number;
   notifyVia: ("webhook" | "slack" | "email")[];
   enabled: boolean;
+  lastTriggeredAt?: string | null;
 }
 
 // ─── Web Servers ──────────────────────────────────────────────────────────────
 
-export type WebServerType = "nginx" | "apache2" | "lighttpd" | "litespeed";
 export type WebServerStatus = "running" | "stopped" | "not_installed";
 
 export interface WebServerInfo {
@@ -346,3 +363,6 @@ export interface ApiResponse<T = unknown> {
   error?: string;
   message?: string;
 }
+
+/** One line from `docker ps --format '{{json .}}'` (keys depend on Docker version). */
+export type DockerContainerRow = Record<string, string>;

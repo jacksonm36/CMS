@@ -1,11 +1,7 @@
-import type { FastifyRequest, FastifyReply, HookHandlerDoneFunction } from "fastify";
+import type { FastifyRequest, FastifyReply } from "fastify";
 import { prisma } from "@hostpanel/db";
 
-export async function ipBlockMiddleware(
-  request: FastifyRequest,
-  reply: FastifyReply,
-  done: HookHandlerDoneFunction
-) {
+export async function ipBlockMiddleware(request: FastifyRequest, reply: FastifyReply) {
   const ip = request.ip;
 
   try {
@@ -13,7 +9,6 @@ export async function ipBlockMiddleware(
     if (blocked) {
       if (!blocked.permanent && blocked.expiresAt && blocked.expiresAt < new Date()) {
         await prisma.blockedIp.delete({ where: { ip } });
-        done();
         return;
       }
       reply.status(403).send({ success: false, error: "Your IP address has been blocked" });
@@ -22,8 +17,6 @@ export async function ipBlockMiddleware(
   } catch {
     // If DB is unavailable, allow the request
   }
-
-  done();
 }
 
 const WINDOW_SECONDS = 300; // 5 minutes

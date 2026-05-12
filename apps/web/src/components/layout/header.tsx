@@ -17,6 +17,7 @@ const routeLabels: Record<string, string> = {
   "/dashboard/redis": "Redis Management",
   "/dashboard/webservers": "Web Servers",
   "/dashboard/crowdsec": "CrowdSec",
+  "/dashboard/docker": "Docker",
   "/dashboard/settings": "Settings",
 };
 

@@ -19,6 +19,9 @@ out
 # Turbo
 .turbo
 
+# TypeScript build info
+*.tsbuildinfo
+
 # Prisma generated client
 packages/db/node_modules
 

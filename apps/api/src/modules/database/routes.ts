@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { requireAuth, requireRole } from "../../lib/auth.js";
+import { requireRole } from "../../lib/auth.js";
 import {
   getDbConnections,
   queryPostgres,
@@ -38,14 +38,14 @@ const createUserSchema = z.object({
 export async function databaseRoutes(app: FastifyInstance) {
   // ─── Connections (registered site databases + built-in) ───────────────────
 
-  app.get("/connections", { preHandler: requireAuth }, async (_request, reply) => {
+  app.get("/connections", { preHandler: requireRole("superadmin", "admin") }, async (_request, reply) => {
     const connections = await getDbConnections();
     return reply.send({ success: true, data: connections });
   });
 
   // ─── Databases list ───────────────────────────────────────────────────────
 
-  app.get("/list", { preHandler: requireAuth }, async (request, reply) => {
+  app.get("/list", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
     const query = request.query as { connectionId?: string; engine?: string };
     const engine = query.engine ?? "postgresql";
 
@@ -89,7 +89,7 @@ export async function databaseRoutes(app: FastifyInstance) {
 
   // ─── Tables ───────────────────────────────────────────────────────────────
 
-  app.get("/:dbName/tables", { preHandler: requireAuth }, async (request, reply) => {
+  app.get("/:dbName/tables", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
     const { dbName } = request.params as { dbName: string };
     const query = request.query as { engine?: string; connectionId?: string };
 
@@ -105,7 +105,7 @@ export async function databaseRoutes(app: FastifyInstance) {
 
   // ─── Table rows (first 200) ────────────────────────────────────────────────
 
-  app.get("/:dbName/tables/:tableName/rows", { preHandler: requireAuth }, async (request, reply) => {
+  app.get("/:dbName/tables/:tableName/rows", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
     const { dbName, tableName } = request.params as { dbName: string; tableName: string };
     const query = request.query as { engine?: string; connectionId?: string; limit?: string; offset?: string };
     const limit = Math.min(500, Number(query.limit ?? 50));
@@ -161,7 +161,7 @@ export async function databaseRoutes(app: FastifyInstance) {
 
   // ─── Database stats ───────────────────────────────────────────────────────
 
-  app.get("/stats", { preHandler: requireAuth }, async (request, reply) => {
+  app.get("/stats", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
     const query = request.query as { connectionId?: string };
     try {
       const stats = await getDbStatsPg(query.connectionId);
@@ -196,7 +196,7 @@ export async function databaseRoutes(app: FastifyInstance) {
 
   // ─── List DB users ────────────────────────────────────────────────────────
 
-  app.get("/users", { preHandler: requireAuth }, async (request, reply) => {
+  app.get("/users", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
     const query = request.query as { connectionId?: string };
     try {
       const result = await queryPostgres(

@@ -1,15 +1,10 @@
-import type { FastifyRequest, FastifyReply, HookHandlerDoneFunction } from "fastify";
+import type { FastifyRequest, FastifyReply } from "fastify";
 import { prisma } from "@hostpanel/db";
 
 const AUDITED_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
-export async function auditMiddleware(
-  request: FastifyRequest,
-  reply: FastifyReply,
-  done: HookHandlerDoneFunction
-) {
+export async function auditMiddleware(request: FastifyRequest, reply: FastifyReply) {
   if (!AUDITED_METHODS.has(request.method)) {
-    done();
     return;
   }
 
@@ -47,8 +42,6 @@ export async function auditMiddleware(
   } catch {
     // Audit failures must never break the request
   }
-
-  done();
 }
 
 function sanitizeBody(body: unknown): unknown {

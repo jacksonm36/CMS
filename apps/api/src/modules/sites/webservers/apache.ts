@@ -1,10 +1,12 @@
 import type { Site } from "@hostpanel/db";
+import { appUpstreamPort } from "./proxy-port.js";
 
 export const APACHE_SITES_DIR = process.env.APACHE_SITES_DIR ?? "/etc/apache2/sites-enabled";
 export const APACHE_LOG_DIR = process.env.APACHE_LOG_DIR ?? "/var/log/apache2";
 
 export function generateConfig(site: Site): string {
   const phpVersion = site.phpVersion ?? "8.2";
+  const upstream = appUpstreamPort(site);
 
   // PHP via mod_php or FPM proxy
   const phpFpmBlock = site.type === "php" ? `
@@ -13,11 +15,13 @@ export function generateConfig(site: Site): string {
         SetHandler "proxy:unix:/run/php/php${phpVersion}-fpm.sock|fcgi://localhost"
     </FilesMatch>` : "";
 
-  // Node.js reverse proxy
-  const proxyBlock = site.type === "nodejs" ? `
+  const proxyBlock =
+    site.type === "nodejs" || site.type === "python"
+      ? `
     ProxyPreserveHost On
-    ProxyPass        / http://localhost:3000/
-    ProxyPassReverse / http://localhost:3000/` : "";
+    ProxyPass        / http://127.0.0.1:${upstream}/
+    ProxyPassReverse / http://127.0.0.1:${upstream}/`
+      : "";
 
   return `# HostPanel — managed by hostpanel (apache2)
 <VirtualHost *:80>

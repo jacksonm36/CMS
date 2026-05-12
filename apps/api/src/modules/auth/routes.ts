@@ -5,10 +5,24 @@ import { authenticator } from "otplib";
 import qrcode from "qrcode";
 import { prisma } from "@hostpanel/db";
 import { recordFailedLogin, clearFailedLogins } from "../../middleware/ipBlock.js";
-import { requireAuth } from "../../lib/auth.js";
+import { requireAuth, requireRole } from "../../lib/auth.js";
+import { HP_TOKEN_COOKIE } from "../../lib/ws-auth.js";
+
+/** Zod's .email() rejects single-label hosts (e.g. admin@localhost) used by default installs. */
+const loginEmail = z
+  .string()
+  .trim()
+  .min(1)
+  .refine(
+    (val) => {
+      if (/^[^\s@]+@localhost$/i.test(val)) return true;
+      return z.string().email().safeParse(val).success;
+    },
+    { message: "Invalid email" }
+  );
 
 const loginSchema = z.object({
-  email: z.string().email(),
+  email: loginEmail,
   password: z.string().min(1),
   totpCode: z.string().optional(),
 });
@@ -27,10 +41,23 @@ const changePasswordSchema = z.object({
 const verifyTotpSchema = z.object({ code: z.string().length(6) });
 
 export async function authRoutes(app: FastifyInstance) {
-  // POST /api/auth/login
-  app.post("/login", async (request, reply) => {
+  // POST /api/auth/login — stricter per-route budget (credential stuffing)
+  app.post(
+    "/login",
+    {
+      config: {
+        rateLimit: {
+          max: 25,
+          timeWindow: "1 minute",
+        },
+      },
+    },
+    async (request, reply) => {
     const body = loginSchema.safeParse(request.body);
-    if (!body.success) return reply.status(400).send({ success: false, error: body.error.message });
+    if (!body.success) {
+      const first = body.error.issues[0]?.message ?? "Invalid request";
+      return reply.status(400).send({ success: false, error: first });
+    }
 
     const { email, password, totpCode } = body.data;
 
@@ -66,6 +93,14 @@ export async function authRoutes(app: FastifyInstance) {
       twoFactorPassed: true,
     });
 
+    reply.setCookie(HP_TOKEN_COOKIE, token, {
+      path: "/",
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 7 * 24 * 60 * 60,
+    });
+
     return reply.send({
       success: true,
       data: {
@@ -76,15 +111,28 @@ export async function authRoutes(app: FastifyInstance) {
           name: user.name,
           role: user.role,
           twoFactorEnabled: user.twoFactorEnabled,
+          dockerAccess: user.dockerAccess,
         },
       },
     });
   });
 
-  // POST /api/auth/register (superadmin only via invite in production)
+  // POST /api/auth/register — first user bootstrap only unless ALLOW_PUBLIC_REGISTRATION=true (prod)
   app.post("/register", async (request, reply) => {
     const body = registerSchema.safeParse(request.body);
     if (!body.success) return reply.status(400).send({ success: false, error: body.error.message });
+
+    const userCount = await prisma.user.count();
+    const registrationAllowed =
+      userCount === 0 ||
+      process.env.ALLOW_PUBLIC_REGISTRATION === "true" ||
+      process.env.NODE_ENV !== "production";
+    if (!registrationAllowed) {
+      return reply.status(403).send({
+        success: false,
+        error: "Public registration is disabled. Ask an administrator for an account.",
+      });
+    }
 
     const { email, name, password } = body.data;
     const existing = await prisma.user.findUnique({ where: { email } });
@@ -92,8 +140,7 @@ export async function authRoutes(app: FastifyInstance) {
       return reply.status(409).send({ success: false, error: "Email already registered" });
     }
 
-    const count = await prisma.user.count();
-    const role = count === 0 ? ("superadmin" as const) : ("viewer" as const);
+    const role = userCount === 0 ? ("superadmin" as const) : ("viewer" as const);
     const passwordHash = await bcrypt.hash(password, 12);
 
     const user = await prisma.user.create({
@@ -102,10 +149,33 @@ export async function authRoutes(app: FastifyInstance) {
 
     const token = app.jwt.sign({ sub: user.id, email: user.email, role: user.role, twoFactorPassed: true });
 
+    reply.setCookie(HP_TOKEN_COOKIE, token, {
+      path: "/",
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 7 * 24 * 60 * 60,
+    });
+
     return reply.status(201).send({
       success: true,
-      data: { token, user: { id: user.id, email: user.email, name: user.name, role: user.role } },
+      data: { token, user: { id: user.id, email: user.email, name: user.name, role: user.role, dockerAccess: user.dockerAccess } },
     });
+  });
+
+  // POST /api/auth/logout — clears HttpOnly session cookie (localStorage cleared client-side)
+  app.post("/logout", async (_request, reply) => {
+    reply.clearCookie(HP_TOKEN_COOKIE, { path: "/" });
+    return reply.send({ success: true });
+  });
+
+  // GET /api/auth/users — panel accounts (assign sites to customers)
+  app.get("/users", { preHandler: requireRole("superadmin", "admin") }, async (_request, reply) => {
+    const users = await prisma.user.findMany({
+      select: { id: true, email: true, name: true, role: true, dockerAccess: true, createdAt: true },
+      orderBy: { email: "asc" },
+    });
+    return reply.send({ success: true, data: users });
   });
 
   // GET /api/auth/me
@@ -113,7 +183,7 @@ export async function authRoutes(app: FastifyInstance) {
     const { sub } = request.user;
     const user = await prisma.user.findUnique({
       where: { id: sub },
-      select: { id: true, email: true, name: true, role: true, twoFactorEnabled: true, avatarUrl: true, createdAt: true },
+      select: { id: true, email: true, name: true, role: true, twoFactorEnabled: true, dockerAccess: true, avatarUrl: true, createdAt: true },
     });
     if (!user) return reply.status(404).send({ success: false, error: "User not found" });
     return reply.send({ success: true, data: user });

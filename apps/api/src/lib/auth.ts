@@ -25,6 +25,30 @@ export function requireRole(...roles: Role[]) {
   };
 }
 
+/** Docker panel + container actions: superadmin/admin, or users with `dockerAccess`. */
+export function requireDockerPanel() {
+  return async (request: FastifyRequest, reply: FastifyReply) => {
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ success: false, error: "Unauthorized" });
+    }
+    const { sub, role } = request.user as { sub: string; role: Role };
+    if (role === "superadmin" || role === "admin") return;
+
+    const u = await prisma.user.findUnique({
+      where: { id: sub },
+      select: { dockerAccess: true },
+    });
+    if (!u?.dockerAccess) {
+      return reply.status(403).send({
+        success: false,
+        error: "Docker access is disabled for your account. Ask an administrator to enable it.",
+      });
+    }
+  };
+}
+
 export async function requireApiKey(request: FastifyRequest, reply: FastifyReply) {
   const authHeader = request.headers.authorization;
   if (!authHeader?.startsWith("Bearer hp_")) {

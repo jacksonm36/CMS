@@ -29,7 +29,7 @@ const integrationSchema = z.object({
 export async function integrationsRoutes(app: FastifyInstance) {
   // ─── Webhooks ─────────────────────────────────────────────────────────────
 
-  app.get("/webhooks", { preHandler: requireAuth }, async (_request, reply) => {
+  app.get("/webhooks", { preHandler: requireRole("superadmin", "admin") }, async (_request, reply) => {
     const hooks = await prisma.webhook.findMany({ orderBy: { createdAt: "desc" } });
     return reply.send({ success: true, data: hooks });
   });

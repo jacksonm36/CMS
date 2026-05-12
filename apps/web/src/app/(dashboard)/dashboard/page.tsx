@@ -1,6 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
+import { useAuth } from "@/lib/auth-context";
 import {
   Globe, Shield, Activity, Server, TrendingUp, TrendingDown, CheckCircle2, AlertTriangle, Clock,
 } from "lucide-react";
@@ -12,16 +13,21 @@ import { StatCard } from "@/components/dashboard/stat-card";
 import { RecentActivity } from "@/components/dashboard/recent-activity";
 
 export default function DashboardPage() {
+  const { user } = useAuth();
+  const staff = user?.role === "superadmin" || user?.role === "admin";
+
   const { data: metricsData } = useQuery({
     queryKey: ["metrics"],
     queryFn: () => apiClient.get<{ data: SystemMetrics }>("/monitoring/metrics"),
     refetchInterval: 10000,
+    enabled: staff,
   });
 
   const { data: metricsHistory } = useQuery({
     queryKey: ["metrics-history"],
     queryFn: () => apiClient.get<{ data: SystemMetrics[] }>("/monitoring/metrics/history?minutes=60"),
     refetchInterval: 60000,
+    enabled: staff,
   });
 
   const { data: sitesData } = useQuery({
@@ -32,6 +38,7 @@ export default function DashboardPage() {
   const { data: uptimeData } = useQuery({
     queryKey: ["uptime"],
     queryFn: () => apiClient.get<{ data: UptimeCheck[] }>("/monitoring/uptime"),
+    enabled: staff,
   });
 
   const metrics = metricsData?.data;
@@ -57,36 +64,38 @@ export default function DashboardPage() {
         />
         <StatCard
           title="CPU Usage"
-          value={metrics ? `${metrics.cpu}%` : "—"}
+          value={!staff ? "—" : metrics ? `${metrics.cpu}%` : "—"}
           icon={Server}
-          color={!metrics ? "muted" : metrics.cpu > 80 ? "red" : metrics.cpu > 60 ? "warn" : "green"}
-          subtitle={metrics ? `${metrics.loadAvg[0].toFixed(2)} load avg` : undefined}
+          color={!staff || !metrics ? "muted" : metrics.cpu > 80 ? "red" : metrics.cpu > 60 ? "warn" : "green"}
+          subtitle={!staff ? "Staff only" : metrics ? `${metrics.loadAvg[0].toFixed(2)} load avg` : undefined}
         />
         <StatCard
           title="Memory"
-          value={metrics ? `${metrics.memory.percent}%` : "—"}
+          value={!staff ? "—" : metrics ? `${metrics.memory.percent}%` : "—"}
           icon={Activity}
-          color={!metrics ? "muted" : metrics.memory.percent > 85 ? "red" : "green"}
-          subtitle={metrics ? `${formatBytes(metrics.memory.used)} / ${formatBytes(metrics.memory.total)}` : undefined}
+          color={!staff || !metrics ? "muted" : metrics.memory.percent > 85 ? "red" : "green"}
+          subtitle={!staff ? "Staff only" : metrics ? `${formatBytes(metrics.memory.used)} / ${formatBytes(metrics.memory.total)}` : undefined}
         />
         <StatCard
           title="Uptime Monitors"
-          value={`${upChecks}/${uptimeChecks.length}`}
+          value={!staff ? "—" : `${upChecks}/${uptimeChecks.length}`}
           icon={Shield}
-          color={downChecks > 0 ? "red" : "green"}
-          trend={downChecks > 0 ? "down" : "up"}
-          subtitle={downChecks > 0 ? `${downChecks} down` : "All healthy"}
+          color={!staff ? "muted" : downChecks > 0 ? "red" : "green"}
+          trend={!staff ? undefined : downChecks > 0 ? "down" : "up"}
+          subtitle={!staff ? "Staff only" : downChecks > 0 ? `${downChecks} down` : "All healthy"}
         />
       </div>
 
-      {/* Charts row */}
+      {/* Charts row — host metrics restricted to staff API */}
+      {staff && (
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <MetricsChart data={history} metric="cpu" title="CPU Usage" color="#6366f1" unit="%" />
         <MetricsChart data={history} metric="memory.percent" title="Memory Usage" color="#8b5cf6" unit="%" />
       </div>
+      )}
 
       {/* Disk / Network */}
-      {metrics && (
+      {staff && metrics && (
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="rounded-xl border bg-card p-5 space-y-3">
             <div className="flex items-center justify-between">

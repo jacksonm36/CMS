@@ -51,9 +51,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const logout = useCallback(() => {
-    localStorage.removeItem("hp_token");
-    setState({ user: null, token: null, loading: false });
-    window.location.href = "/login";
+    void fetch("/api/auth/logout", { method: "POST", credentials: "include" }).finally(() => {
+      localStorage.removeItem("hp_token");
+      setState({ user: null, token: null, loading: false });
+      window.location.href = "/login";
+    });
   }, []);
 
   return (

@@ -1,4 +1,5 @@
 import type { Site } from "@hostpanel/db";
+import { appUpstreamPort } from "./proxy-port.js";
 
 // LiteSpeed Community Edition uses Apache-compatible vhost syntax
 // but is typically managed via /usr/local/lsws/conf/vhosts/
@@ -7,6 +8,7 @@ export const LSWS_LOG_DIR = process.env.LSWS_LOG_DIR ?? "/usr/local/lsws/logs";
 
 export function generateConfig(site: Site): string {
   const phpVersion = site.phpVersion ?? "8.2";
+  const upstream = appUpstreamPort(site);
   const phpHandler = `lsapi:/tmp/lshttpd/php${phpVersion.replace(".", "")}`;
 
   const phpBlock = site.type === "php" ? `
@@ -17,10 +19,13 @@ export function generateConfig(site: Site): string {
       SetHandler application/x-httpd-php
   </FilesMatch>` : "";
 
-  const proxyBlock = site.type === "nodejs" ? `
-  # Node.js reverse proxy
-  ProxyPass        / http://localhost:3000/
-  ProxyPassReverse / http://localhost:3000/` : "";
+  const proxyBlock =
+    site.type === "nodejs" || site.type === "python"
+      ? `
+  # Node.js / Python reverse proxy
+  ProxyPass        / http://127.0.0.1:${upstream}/
+  ProxyPassReverse / http://127.0.0.1:${upstream}/`
+      : "";
 
   // LiteSpeed native config format (XML-like)
   return `# HostPanel — managed by hostpanel (litespeed)

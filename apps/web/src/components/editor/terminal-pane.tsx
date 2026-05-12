@@ -2,6 +2,8 @@
 
 import { useEffect, useRef } from "react";
 import { X } from "lucide-react";
+import { getBrowserApiWebSocketBase } from "@/lib/browser-api-origin";
+import { jwtToWebSocketProtocol } from "@/lib/ws-jwt-protocol";
 
 interface TerminalPaneProps {
   siteId: string;
@@ -65,15 +67,16 @@ export function TerminalPane({ siteId, height }: TerminalPaneProps) {
 
       xtermRef.current = { term, fitAddon };
 
-      // WebSocket connection to API shell endpoint
-      const wsUrl = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000")
-        .replace("http://", "ws://")
-        .replace("https://", "wss://");
+      // WebSocket hits the API directly (Next rewrites do not upgrade WS)
+      const wsUrl = getBrowserApiWebSocketBase();
 
       const token = localStorage.getItem("hp_token");
 
       try {
-        const ws = new WebSocket(`${wsUrl}/api/sites/${siteId}/terminal?token=${token}`);
+        const wsProto = token ? jwtToWebSocketProtocol(token) : "";
+        const ws = token
+          ? new WebSocket(`${wsUrl}/api/sites/${siteId}/terminal`, [wsProto])
+          : new WebSocket(`${wsUrl}/api/sites/${siteId}/terminal`);
         wsRef.current = ws;
 
         ws.onopen = () => term.writeln("\r\n\x1b[32m✓ Connected to shell\x1b[0m\r\n");

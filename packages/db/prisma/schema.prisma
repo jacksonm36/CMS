@@ -20,10 +20,12 @@ model User {
   oauthProvider   String?
   oauthId         String?
   avatarUrl       String?
+  /// When true (and not staff), user may open Docker panel and run container actions. Staff always have access.
+  dockerAccess    Boolean   @default(false)
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
-  sites           Site[]
+  sites           Site[]       @relation("SiteOwner")
   apiKeys         ApiKey[]
   auditLogs       AuditLog[]
   contentEntries  ContentEntry[]
@@ -51,13 +53,23 @@ model Site {
   type                SiteType    @default(static)
   webServer           WebServer   @default(nginx)
   phpVersion          String?
+  /// Node.js major line for this site (e.g. "20") — used in vhost metadata / future tooling
+  nodeVersion         String?
+  /// Python minor line (e.g. "3.12") — used in vhost metadata / future tooling
+  pythonVersion       String?
+  /// Preferred DB server stack label (e.g. "postgresql-16") — documentation & provisioning hints
+  dbStackVersion      String?
+  /// Reverse-proxy target port for Node/Python apps (default 3000)
+  appProxyPort        Int?
   dockerContainerId   String?
   rootPath            String
   webConfigPath       String?
+  templateId          String?
   createdAt           DateTime    @default(now())
   updatedAt           DateTime    @updatedAt
 
-  owner               User        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  owner               User           @relation("SiteOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  template            SiteTemplate?  @relation(fields: [templateId], references: [id], onDelete: SetNull)
   databases           SiteDatabase[]
   cronJobs            CronJob[]
   sslCert             SslCert?
@@ -73,6 +85,9 @@ enum WebServer {
   apache2
   lighttpd
   litespeed
+  caddy
+  openresty
+  traefik
 }
 
 enum SiteStatus {
@@ -87,6 +102,27 @@ enum SiteType {
   static
   nodejs
   python
+}
+
+/// Admin-defined presets (Node VPS-style stacks, PHP bundles, etc.) for provisioning customer sites.
+model SiteTemplate {
+  id               String      @id @default(cuid())
+  name             String
+  slug             String      @unique
+  description      String?
+  type             SiteType    @default(static)
+  webServer        WebServer   @default(nginx)
+  phpVersion       String?
+  nodeVersion      String?
+  pythonVersion    String?
+  dbStackVersion   String?
+  appProxyPort     Int?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  sites            Site[]
+
+  @@map("site_templates")
 }
 
 model SiteDatabase {

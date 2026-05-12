@@ -1,10 +1,12 @@
 import type { Site } from "@hostpanel/db";
+import { appUpstreamPort } from "./proxy-port.js";
 
 export const LIGHTTPD_CONF_DIR = process.env.LIGHTTPD_CONF_DIR ?? "/etc/lighttpd/conf-enabled";
 export const LIGHTTPD_LOG_DIR = process.env.LIGHTTPD_LOG_DIR ?? "/var/log/lighttpd";
 
 export function generateConfig(site: Site): string {
   const phpVersion = site.phpVersion ?? "8.2";
+  const upstream = appUpstreamPort(site);
 
   const phpBlock = site.type === "php" ? `
 # PHP via FastCGI
@@ -15,14 +17,17 @@ fastcgi.server += (
     ))
 )` : "";
 
-  const proxyBlock = site.type === "nodejs" ? `
-# Node.js reverse proxy
+  const proxyBlock =
+    site.type === "nodejs" || site.type === "python"
+      ? `
+# Node.js / Python reverse proxy
 proxy.server = (
     "" => ((
         "host" => "127.0.0.1",
-        "port" => 3000
+        "port" => ${upstream}
     ))
-)` : "";
+)`
+      : "";
 
   return `# HostPanel — managed by hostpanel (lighttpd)
 $HTTP["host"] =~ "^(www\\.)?${site.domain.replace(".", "\\.")}$" {

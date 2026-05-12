@@ -1,7 +1,9 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { prisma } from "@hostpanel/db";
+import { prisma, type Prisma } from "@hostpanel/db";
+import type { Role } from "@hostpanel/types";
 import { requireAuth, requireRole } from "../../lib/auth.js";
+import { isStaffRole } from "../../lib/site-access.js";
 import { saveMediaFile } from "./media.js";
 
 const contentTypeSchema = z.object({
@@ -31,7 +33,13 @@ export async function contentRoutes(app: FastifyInstance) {
     const existing = await prisma.contentType.findUnique({ where: { slug: body.data.slug } });
     if (existing) return reply.status(409).send({ success: false, error: "Slug already exists" });
 
-    const ct = await prisma.contentType.create({ data: body.data });
+    const ct = await prisma.contentType.create({
+      data: {
+        name: body.data.name,
+        slug: body.data.slug,
+        schema: body.data.schema as unknown as Prisma.InputJsonValue,
+      },
+    });
     return reply.status(201).send({ success: true, data: ct });
   });
 
@@ -40,7 +48,15 @@ export async function contentRoutes(app: FastifyInstance) {
     const body = contentTypeSchema.partial().safeParse(request.body);
     if (!body.success) return reply.status(400).send({ success: false, error: body.error.message });
 
-    const ct = await prisma.contentType.update({ where: { id }, data: body.data });
+    const ct = await prisma.contentType.update({
+      where: { id },
+      data: {
+        ...body.data,
+        ...(body.data.schema !== undefined
+          ? { schema: body.data.schema as unknown as Prisma.InputJsonValue }
+          : {}),
+      } as Prisma.ContentTypeUpdateInput,
+    });
     return reply.send({ success: true, data: ct });
   });
 
@@ -57,7 +73,9 @@ export async function contentRoutes(app: FastifyInstance) {
     const page = Math.max(1, Number(query.page ?? 1));
     const pageSize = Math.min(100, Number(query.pageSize ?? 20));
 
+    const { sub, role } = request.user as { sub: string; role: Role };
     const where: Record<string, unknown> = {};
+    if (!isStaffRole(role)) where.authorId = sub;
     if (query.typeId) where.typeId = query.typeId;
     if (query.published !== undefined) where.published = query.published === "true";
 
@@ -80,7 +98,12 @@ export async function contentRoutes(app: FastifyInstance) {
     if (!body.success) return reply.status(400).send({ success: false, error: body.error.message });
 
     const entry = await prisma.contentEntry.create({
-      data: { ...body.data, authorId: request.user.sub },
+      data: {
+        typeId: body.data.typeId,
+        data: body.data.data as Prisma.InputJsonValue,
+        published: body.data.published,
+        authorId: request.user.sub,
+      },
     });
     return reply.status(201).send({ success: true, data: entry });
   });
@@ -90,7 +113,20 @@ export async function contentRoutes(app: FastifyInstance) {
     const body = z.object({ data: z.record(z.unknown()).optional(), published: z.boolean().optional() }).safeParse(request.body);
     if (!body.success) return reply.status(400).send({ success: false, error: body.error.message });
 
-    const entry = await prisma.contentEntry.update({ where: { id }, data: body.data });
+    const existing = await prisma.contentEntry.findUnique({ where: { id } });
+    if (!existing) return reply.status(404).send({ success: false, error: "Entry not found" });
+    const { sub, role } = request.user as { sub: string; role: Role };
+    if (!isStaffRole(role) && existing.authorId !== sub) {
+      return reply.status(403).send({ success: false, error: "Forbidden" });
+    }
+
+    const entry = await prisma.contentEntry.update({
+      where: { id },
+      data: {
+        ...(body.data.data !== undefined ? { data: body.data.data as Prisma.InputJsonValue } : {}),
+        ...(body.data.published !== undefined ? { published: body.data.published } : {}),
+      },
+    });
     return reply.send({ success: true, data: entry });
   });
 
@@ -122,9 +158,17 @@ export async function contentRoutes(app: FastifyInstance) {
     const page = Math.max(1, Number(query.page ?? 1));
     const pageSize = Math.min(100, Number(query.pageSize ?? 20));
 
+    const { sub, role } = request.user as { sub: string; role: Role };
+    const scope = isStaffRole(role) ? {} : { uploadedBy: sub };
+
     const [files, total] = await Promise.all([
-      prisma.mediaFile.findMany({ orderBy: { createdAt: "desc" }, skip: (page - 1) * pageSize, take: pageSize }),
-      prisma.mediaFile.count(),
+      prisma.mediaFile.findMany({
+        where: scope,
+        orderBy: { createdAt: "desc" },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      prisma.mediaFile.count({ where: scope }),
     ]);
 
     return reply.send({ success: true, data: { data: files, total, page, pageSize, totalPages: Math.ceil(total / pageSize) } });
@@ -138,8 +182,14 @@ export async function contentRoutes(app: FastifyInstance) {
     return reply.status(201).send({ success: true, data: file });
   });
 
-  app.delete("/media/:id", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
+  app.delete("/media/:id", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = request.params as { id: string };
+    const row = await prisma.mediaFile.findUnique({ where: { id } });
+    if (!row) return reply.status(404).send({ success: false, error: "Not found" });
+    const { sub, role } = request.user as { sub: string; role: Role };
+    if (!isStaffRole(role) && row.uploadedBy !== sub) {
+      return reply.status(403).send({ success: false, error: "Forbidden" });
+    }
     await prisma.mediaFile.delete({ where: { id } });
     return reply.send({ success: true, message: "File deleted" });
   });

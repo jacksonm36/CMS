@@ -1,0 +1,27 @@
+# HostPanel — passwordless sudo for the panel API user (web servers + apt installs)
+# Installed to /etc/sudoers.d/hostpanel by install.sh
+hostpanel ALL=(ALL) NOPASSWD: /usr/sbin/nginx, \
+  /usr/sbin/apache2ctl, /usr/sbin/apachectl, \
+  /usr/sbin/service nginx *, /usr/sbin/service apache2 *, \
+  /usr/sbin/service lighttpd *, /usr/sbin/service lsws *, \
+  /bin/systemctl reload nginx, /bin/systemctl reload apache2, /bin/systemctl reload lighttpd, \
+  /bin/systemctl restart nginx, /bin/systemctl restart apache2, \
+  /bin/systemctl restart lighttpd, /bin/systemctl restart lsws, \
+  /bin/systemctl start nginx, /bin/systemctl stop nginx, \
+  /bin/systemctl start apache2, /bin/systemctl stop apache2, \
+  /bin/systemctl start lighttpd, /bin/systemctl stop lighttpd, \
+  /bin/systemctl start lsws, /bin/systemctl stop lsws, \
+  /usr/bin/apt-get, /usr/bin/wget, /bin/bash /tmp/hostpanel-lsws-repo.sh, \
+  /usr/sbin/a2enmod, /usr/sbin/a2dismod, /usr/sbin/lighttpd-enable-mod, \
+  /usr/sbin/iptables, /usr/sbin/ip6tables, \
+  /usr/local/lsws/bin/lswsctrl *, \
+  /usr/bin/caddy, /usr/bin/openresty, /usr/bin/traefik, \
+  /bin/systemctl reload caddy, /bin/systemctl restart caddy, \
+  /bin/systemctl start caddy, /bin/systemctl stop caddy, \
+  /bin/systemctl reload openresty, /bin/systemctl restart openresty, \
+  /bin/systemctl start openresty, /bin/systemctl stop openresty, \
+  /bin/systemctl reload traefik, /bin/systemctl restart traefik, \
+  /bin/systemctl start traefik, /bin/systemctl stop traefik, \
+  /usr/sbin/service caddy *, /usr/sbin/service openresty *, /usr/sbin/service traefik *, \
+  /bin/bash /usr/local/hostpanel/bin/hostpanel-install-node.sh *, \
+  /bin/bash /opt/hostpanel/deploy/hostpanel-install-node.sh *

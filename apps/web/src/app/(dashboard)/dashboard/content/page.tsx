@@ -152,7 +152,7 @@ function ContentTypesTab() {
             <p className="text-xs text-muted-foreground">{(type.schema as unknown[]).length} field{(type.schema as unknown[]).length !== 1 ? "s" : ""}</p>
             <p className="text-xs text-muted-foreground mt-1">Created {formatRelative(type.createdAt)}</p>
             <div className="mt-3 pt-3 border-t border-border flex gap-2">
-              <a href={`${process.env.NEXT_PUBLIC_API_URL}/api/content/public/${type.slug}`} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-xs text-primary hover:underline">
+              <a href={`/api/content/public/${type.slug}`} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-xs text-primary hover:underline">
                 <Eye className="w-3 h-3" /> View API
               </a>
             </div>
@@ -281,7 +281,7 @@ function MediaTab() {
     const formData = new FormData();
     formData.append("file", file);
     const token = localStorage.getItem("hp_token");
-    await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/content/media`, {
+    await fetch("/api/content/media", {
       method: "POST",
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       body: formData,

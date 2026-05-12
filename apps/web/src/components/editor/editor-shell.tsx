@@ -3,7 +3,20 @@
 import { useState, useEffect, useCallback } from "react";
 import { useSearchParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Code2, Eye, Layers, ChevronRight, ChevronDown, File, Folder, Save, RefreshCw, Terminal } from "lucide-react";
+import {
+  Code2,
+  Eye,
+  Layers,
+  ChevronRight,
+  ChevronDown,
+  File,
+  Folder,
+  Save,
+  RefreshCw,
+  Terminal,
+  Plus,
+  Loader2,
+} from "lucide-react";
 import { apiClient } from "@/lib/api";
 import type { Site } from "@hostpanel/types";
 import { MonacoEditor } from "./monaco-editor";
@@ -30,7 +43,7 @@ export function EditorShell() {
   const [currentFile, setCurrentFile] = useState("/index.html");
   const [content, setContent] = useState("");
   const [isDirty, setIsDirty] = useState(false);
-  const [expandedDirs, setExpandedDirs] = useState(new Set([""]));
+  const [expandedDirs, setExpandedDirs] = useState<Set<string>>(() => new Set());
   const [showTerminal, setShowTerminal] = useState(false);
   const [terminalHeight, setTerminalHeight] = useState(200);
 
@@ -45,12 +58,6 @@ export function EditorShell() {
   useEffect(() => {
     if (!selectedSiteId && sites.length > 0) setSelectedSiteId(sites[0]!.id);
   }, [sites, selectedSiteId]);
-
-  const { data: filesData } = useQuery({
-    queryKey: ["files", selectedSiteId, "/"],
-    queryFn: () => apiClient.get<{ data: FileEntry[] }>(`/sites/${selectedSiteId}/files?path=/`),
-    enabled: !!selectedSiteId,
-  });
 
   const { data: fileContent, isLoading: loadingFile } = useQuery({
     queryKey: ["file-content", selectedSiteId, currentFile],
@@ -72,6 +79,25 @@ export function EditorShell() {
     onSuccess: () => {
       setIsDirty(false);
       queryClient.invalidateQueries({ queryKey: ["file-content", selectedSiteId, currentFile] });
+      void queryClient.invalidateQueries({ queryKey: ["files", selectedSiteId] });
+    },
+  });
+
+  const createFileMutation = useMutation({
+    mutationFn: (path: string) => {
+      const normalized = path.startsWith("/") ? path : `/${path}`;
+      const isHtml = /\.html?$/i.test(normalized);
+      const body = isHtml
+        ? `<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="UTF-8" />\n  <meta name="viewport" content="width=device-width, initial-scale=1" />\n  <title>New page</title>\n</head>\n<body>\n  <p>Edit this page in Code or Visual mode.</p>\n</body>\n</html>\n`
+        : "";
+      return apiClient.post(`/sites/${selectedSiteId}/files/write`, { path: normalized, content: body });
+    },
+    onSuccess: async (_, path) => {
+      await queryClient.invalidateQueries({ queryKey: ["files", selectedSiteId] });
+      setCurrentFile(path);
+      setMode("code");
+      setIsDirty(false);
+      await queryClient.invalidateQueries({ queryKey: ["file-content", selectedSiteId, path] });
     },
   });
 
@@ -101,13 +127,20 @@ export function EditorShell() {
     return map[ext ?? ""] ?? "plaintext";
   };
 
-  const files = filesData?.data ?? [];
+  const handleNewFile = useCallback(() => {
+    if (!selectedSiteId) return;
+    const suggested = "/new-page.html";
+    const raw = window.prompt("New file path (from site root)", suggested);
+    if (raw == null || !raw.trim()) return;
+    const path = raw.trim().startsWith("/") ? raw.trim() : `/${raw.trim()}`;
+    createFileMutation.mutate(path);
+  }, [selectedSiteId, createFileMutation]);
 
   return (
     <div className="flex h-full bg-background">
       {/* File tree sidebar */}
       <div className="w-56 border-r border-border flex flex-col bg-sidebar shrink-0">
-        <div className="p-3 border-b border-border">
+        <div className="p-3 border-b border-border space-y-2">
           <select
             value={selectedSiteId}
             onChange={(e) => setSelectedSiteId(e.target.value)}
@@ -116,15 +149,58 @@ export function EditorShell() {
             <option value="">Select site...</option>
             {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
+          {selectedSiteId && (
+            <div className="flex gap-1">
+              <button
+                type="button"
+                onClick={handleNewFile}
+                disabled={createFileMutation.isPending}
+                className="flex-1 flex items-center justify-center gap-1 text-[11px] font-medium rounded-md border border-border bg-secondary/40 py-1.5 hover:bg-secondary/70 disabled:opacity-50"
+              >
+                {createFileMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+                New file
+              </button>
+              <button
+                type="button"
+                title="Refresh file list"
+                onClick={() => void queryClient.invalidateQueries({ queryKey: ["files", selectedSiteId] })}
+                className="px-2 rounded-md border border-border bg-secondary/40 hover:bg-secondary/70"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
         </div>
-        <div className="flex-1 overflow-auto py-1">
-          {files.map((entry) => (
-            <FileTreeItem
-              key={entry.path}
-              entry={entry}
+        {selectedSiteId && (
+          <div className="border-b border-border px-3 py-2 space-y-1.5 shrink-0">
+            <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Quick open</p>
+            <div className="flex flex-wrap gap-1">
+              {["/index.html", "/styles.css", "/style.css", "/main.css", "/app.js", "/script.js"].map((p) => (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => setCurrentFile(p)}
+                  className={cn(
+                    "text-[10px] px-1.5 py-0.5 rounded border transition-colors",
+                    currentFile === p
+                      ? "border-sky-500/60 bg-sky-500/15 text-sky-200"
+                      : "border-border/80 text-muted-foreground hover:text-foreground hover:bg-secondary/50"
+                  )}
+                >
+                  {p.replace(/^\//, "")}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        <div className="flex-1 overflow-auto py-1 min-h-0">
+          {selectedSiteId ? (
+            <FileTreeBranch
+              siteId={selectedSiteId}
+              dirPath="/"
               depth={0}
-              selectedPath={currentFile}
-              onSelect={(path) => setCurrentFile(path)}
+              currentFile={currentFile}
+              onSelectFile={(path) => setCurrentFile(path)}
               expandedDirs={expandedDirs}
               onToggleDir={(path) => {
                 setExpandedDirs((prev) => {
@@ -135,17 +211,14 @@ export function EditorShell() {
                 });
               }}
             />
-          ))}
-          {files.length === 0 && selectedSiteId && (
-            <p className="px-4 py-3 text-xs text-muted-foreground">No files found</p>
-          )}
+          ) : null}
         </div>
       </div>
 
       {/* Main editor area */}
       <div className="flex flex-col flex-1 min-w-0">
         {/* Toolbar */}
-        <div className="flex items-center justify-between px-4 h-11 border-b border-border bg-card/50 shrink-0">
+        <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5 px-4 py-2 min-h-11 border-b border-border bg-card/50 shrink-0">
           <div className="flex items-center gap-1 bg-secondary/50 rounded-lg p-0.5">
             {(["code", "visual", "preview"] as const).map((m) => (
               <button
@@ -164,10 +237,17 @@ export function EditorShell() {
             ))}
           </div>
 
-          <div className="flex items-center gap-1 text-xs text-muted-foreground truncate max-w-xs">
-            <File className="w-3.5 h-3.5 shrink-0" />
-            <span className="truncate font-mono">{currentFile}</span>
-            {isDirty && <span className="w-1.5 h-1.5 bg-amber-400 rounded-full shrink-0" />}
+          <div className="flex flex-col items-center min-w-0 max-w-md mx-2">
+            <div className="flex items-center gap-1 text-xs text-muted-foreground truncate w-full justify-center">
+              <File className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate font-mono">{currentFile}</span>
+              {isDirty && <span className="w-1.5 h-1.5 bg-amber-400 rounded-full shrink-0" title="Unsaved" />}
+            </div>
+            <p className="text-[10px] text-muted-foreground/80 truncate w-full text-center max-sm:hidden leading-tight">
+              {mode === "visual"
+                ? "Click anything in the page to edit · Drag blocks from the right · Ctrl+Z / Ctrl+Shift+Z undo · Ctrl+S saves"
+                : "Ctrl+S saves · Expand folders in the sidebar for nested files"}
+            </p>
           </div>
 
           <div className="flex items-center gap-1">
@@ -190,7 +270,9 @@ export function EditorShell() {
               disabled={!isDirty || saveMutation.isPending}
               className={cn(
                 "flex items-center gap-1.5 px-3 h-7 rounded text-xs font-medium transition-colors",
-                isDirty ? "bg-primary text-primary-foreground hover:bg-primary/90" : "bg-secondary text-muted-foreground cursor-default"
+                isDirty
+                  ? "bg-sky-600 text-white hover:bg-sky-500 shadow-sm"
+                  : "bg-secondary text-muted-foreground cursor-default"
               )}
             >
               <Save className="w-3.5 h-3.5" />
@@ -200,8 +282,8 @@ export function EditorShell() {
         </div>
 
         {/* Editor area */}
-        <div className="flex-1 relative overflow-hidden flex flex-col">
-          <div className="flex-1 overflow-hidden">
+        <div className="flex-1 min-h-0 relative overflow-hidden flex flex-col">
+          <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
             {loadingFile ? (
               <div className="h-full flex items-center justify-center">
                 <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin" />
@@ -215,14 +297,15 @@ export function EditorShell() {
               />
             ) : mode === "visual" ? (
               <VisualEditor
+                key={`${selectedSiteId}:${currentFile}`}
                 content={content}
                 onChange={(html) => { setContent(html); setIsDirty(true); }}
               />
             ) : (
-              <div className="h-full bg-white">
+              <div className="h-full min-h-0 bg-white flex flex-col">
                 <iframe
                   srcDoc={content}
-                  className="w-full h-full border-none"
+                  className="w-full flex-1 min-h-0 border-none"
                   sandbox="allow-scripts"
                   title="Live Preview"
                 />
@@ -245,45 +328,92 @@ export function EditorShell() {
   );
 }
 
-function FileTreeItem({
-  entry,
+function FileTreeBranch({
+  siteId,
+  dirPath,
   depth,
-  selectedPath,
-  onSelect,
+  currentFile,
+  onSelectFile,
   expandedDirs,
   onToggleDir,
 }: {
-  entry: FileEntry;
+  siteId: string;
+  dirPath: string;
   depth: number;
-  selectedPath: string;
-  onSelect: (path: string) => void;
+  currentFile: string;
+  onSelectFile: (path: string) => void;
   expandedDirs: Set<string>;
   onToggleDir: (path: string) => void;
 }) {
-  const isExpanded = expandedDirs.has(entry.path);
+  const { data, isLoading, isFetching } = useQuery({
+    queryKey: ["files", siteId, dirPath],
+    queryFn: () =>
+      apiClient.get<{ data: FileEntry[] }>(`/sites/${siteId}/files?path=${encodeURIComponent(dirPath)}`),
+    enabled: !!siteId,
+    staleTime: 15_000,
+  });
+
+  const entries = data?.data ?? [];
+  const showLoader = (isLoading || isFetching) && entries.length === 0;
 
   return (
-    <div>
-      <button
-        onClick={() => {
-          if (entry.type === "directory") onToggleDir(entry.path);
-          else onSelect(entry.path);
-        }}
-        className={cn(
-          "w-full flex items-center gap-1.5 px-3 py-1 text-xs transition-colors text-left hover:bg-sidebar-accent",
-          selectedPath === entry.path && "bg-primary/10 text-primary",
-          selectedPath !== entry.path && "text-sidebar-foreground"
-        )}
-        style={{ paddingLeft: `${12 + depth * 14}px` }}
-      >
-        {entry.type === "directory" ? (
-          isExpanded ? <ChevronDown className="w-3 h-3 shrink-0" /> : <ChevronRight className="w-3 h-3 shrink-0" />
-        ) : null}
-        {entry.type === "directory"
-          ? <Folder className="w-3.5 h-3.5 shrink-0 text-amber-400" />
-          : <File className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />}
-        <span className="truncate">{entry.name}</span>
-      </button>
-    </div>
+    <>
+      {showLoader && (
+        <div className="flex items-center gap-2 px-4 py-2 text-xs text-muted-foreground" style={{ paddingLeft: `${12 + depth * 14}px` }}>
+          <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+          Loading…
+        </div>
+      )}
+      {!showLoader && entries.length === 0 && (
+        <p className="px-4 py-2 text-xs text-muted-foreground leading-relaxed" style={{ paddingLeft: `${12 + depth * 14}px` }}>
+          {depth === 0
+            ? "This folder is empty. Use Quick open, New file, or add files on the server."
+            : "Empty folder."}
+        </p>
+      )}
+      {entries.map((entry) => {
+        const isExpanded = entry.type === "directory" && expandedDirs.has(entry.path);
+        return (
+          <div key={entry.path}>
+            <button
+              type="button"
+              onClick={() => {
+                if (entry.type === "directory") onToggleDir(entry.path);
+                else onSelectFile(entry.path);
+              }}
+              className={cn(
+                "w-full flex items-center gap-1.5 px-3 py-1 text-xs transition-colors text-left hover:bg-sidebar-accent",
+                currentFile === entry.path && entry.type === "file" && "bg-sky-500/10 text-sky-200",
+                !(currentFile === entry.path && entry.type === "file") && "text-sidebar-foreground"
+              )}
+              style={{ paddingLeft: `${12 + depth * 14}px` }}
+            >
+              {entry.type === "directory" ? (
+                isExpanded ? <ChevronDown className="w-3 h-3 shrink-0" /> : <ChevronRight className="w-3 h-3 shrink-0" />
+              ) : (
+                <span className="w-3 shrink-0" />
+              )}
+              {entry.type === "directory" ? (
+                <Folder className="w-3.5 h-3.5 shrink-0 text-amber-400" />
+              ) : (
+                <File className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
+              )}
+              <span className="truncate">{entry.name}</span>
+            </button>
+            {entry.type === "directory" && isExpanded && (
+              <FileTreeBranch
+                siteId={siteId}
+                dirPath={entry.path}
+                depth={depth + 1}
+                currentFile={currentFile}
+                onSelectFile={onSelectFile}
+                expandedDirs={expandedDirs}
+                onToggleDir={onToggleDir}
+              />
+            )}
+          </div>
+        );
+      })}
+    </>
   );
 }

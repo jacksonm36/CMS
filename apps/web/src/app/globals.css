@@ -92,4 +92,13 @@
   .metric-up { @apply text-emerald-400; }
   .metric-down { @apply text-red-400; }
   .metric-warn { @apply text-amber-400; }
+
+  /* Web server install panel — indeterminate progress strip */
+  @keyframes hp-install-indeterminate {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(400%); }
+  }
+  .animate-hp-install-bar {
+    animation: hp-install-indeterminate 1.35s ease-in-out infinite;
+  }
 }

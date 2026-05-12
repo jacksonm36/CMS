@@ -17,41 +17,57 @@ import {
   Layers,
   MonitorCog,
   ShieldAlert,
+  LayoutTemplate,
+  Box,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-
-const navGroups = [
-  {
-    label: "Main",
-    items: [
-      { href: "/dashboard", icon: LayoutDashboard, label: "Overview", exact: true },
-      { href: "/dashboard/sites", icon: Globe, label: "Sites" },
-      { href: "/dashboard/webservers", icon: MonitorCog, label: "Web Servers" },
-      { href: "/dashboard/editor", icon: Code2, label: "Editor" },
-    ],
-  },
-  {
-    label: "Data",
-    items: [
-      { href: "/dashboard/databases", icon: Database, label: "Databases" },
-      { href: "/dashboard/redis", icon: Layers, label: "Redis" },
-      { href: "/dashboard/content", icon: FileText, label: "Content" },
-    ],
-  },
-  {
-    label: "Ops",
-    items: [
-      { href: "/dashboard/security", icon: Shield, label: "Security" },
-      { href: "/dashboard/crowdsec", icon: ShieldAlert, label: "CrowdSec" },
-      { href: "/dashboard/integrations", icon: Zap, label: "Integrations" },
-      { href: "/dashboard/monitoring", icon: Activity, label: "Monitoring" },
-      { href: "/dashboard/settings", icon: Settings, label: "Settings" },
-    ],
-  },
-];
+import { useAuth } from "@/lib/auth-context";
 
 export function Sidebar() {
   const pathname = usePathname();
+  const { user } = useAuth();
+  const staff = user?.role === "superadmin" || user?.role === "admin";
+  const dockerUser = Boolean(user?.dockerAccess);
+
+  const navGroups = [
+    {
+      label: "Main",
+      items: [
+        { href: "/dashboard", icon: LayoutDashboard, label: "Overview", exact: true },
+        { href: "/dashboard/sites", icon: Globe, label: "Sites" },
+        ...(staff
+          ? [
+              { href: "/dashboard/site-templates", icon: LayoutTemplate, label: "Site templates" },
+              { href: "/dashboard/webservers", icon: MonitorCog, label: "Web Servers" },
+            ]
+          : []),
+        ...(staff || dockerUser ? [{ href: "/dashboard/docker", icon: Box, label: "Docker" }] : []),
+        { href: "/dashboard/editor", icon: Code2, label: "Editor" },
+      ],
+    },
+    {
+      label: "Data",
+      items: staff
+        ? [
+            { href: "/dashboard/databases", icon: Database, label: "Databases" },
+            { href: "/dashboard/redis", icon: Layers, label: "Redis" },
+            { href: "/dashboard/content", icon: FileText, label: "Content" },
+          ]
+        : [{ href: "/dashboard/content", icon: FileText, label: "Content" }],
+    },
+    {
+      label: "Ops",
+      items: staff
+        ? [
+            { href: "/dashboard/security", icon: Shield, label: "Security" },
+            { href: "/dashboard/crowdsec", icon: ShieldAlert, label: "CrowdSec" },
+            { href: "/dashboard/integrations", icon: Zap, label: "Integrations" },
+            { href: "/dashboard/monitoring", icon: Activity, label: "Monitoring" },
+            { href: "/dashboard/settings", icon: Settings, label: "Settings" },
+          ]
+        : [{ href: "/dashboard/settings", icon: Settings, label: "Settings" }],
+    },
+  ];
 
   function isActive(href: string, exact?: boolean) {
     if (exact) return pathname === href;

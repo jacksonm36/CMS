@@ -1,17 +1,42 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Activity, Plus, Trash2, CheckCircle2, XCircle, AlertTriangle, Bell } from "lucide-react";
 import { apiClient } from "@/lib/api";
 import { formatRelative } from "@/lib/utils";
 import type { UptimeCheck, AlertRule, SystemMetrics } from "@hostpanel/types";
 import { MetricsChart } from "@/components/monitoring/metrics-chart";
+import { useAuth } from "@/lib/auth-context";
 
 type Tab = "overview" | "uptime" | "alerts";
 
 export default function MonitoringPage() {
+  const router = useRouter();
+  const { user, loading } = useAuth();
+  const staff = user?.role === "superadmin" || user?.role === "admin";
   const [tab, setTab] = useState<Tab>("overview");
+
+  useEffect(() => {
+    if (!loading && user && !staff) router.replace("/dashboard");
+  }, [loading, user, staff, router]);
+
+  if (loading || !user) {
+    return (
+      <div className="flex items-center justify-center min-h-[40vh] text-sm text-muted-foreground">
+        Loading…
+      </div>
+    );
+  }
+
+  if (!staff) {
+    return (
+      <div className="flex items-center justify-center min-h-[40vh] text-sm text-muted-foreground">
+        Redirecting…
+      </div>
+    );
+  }
 
   const tabs: { id: Tab; label: string; icon: React.ElementType }[] = [
     { id: "overview", label: "System Metrics", icon: Activity },

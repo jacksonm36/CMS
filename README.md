@@ -1,12 +1,31 @@
 # HostPanel
 
-A security-first web hosting control panel inspired by aaPanel — featuring a live code/visual editor, per-site web server selection, CrowdSec threat intelligence, SSL management, database/Redis management, and a full integrations hub.
+A security-first web hosting control panel inspired by aaPanel — featuring a live code/visual editor, per-site web server selection, Docker management, CrowdSec threat intelligence, SSL management, database/Redis management, site templates, and a full integrations hub.
 
-**Bare metal only** — runs directly on your Linux server, no Docker required.
+**Bare metal only** — runs directly on your Linux server, no Docker required (Docker is optional for isolated site containers).
 
 ---
 
-## One-Line Install
+## Table of Contents
+
+- [Quick Install](#quick-install)
+- [Install Options](#install-options)
+- [Supported Operating Systems](#supported-operating-systems)
+- [What Gets Installed](#what-gets-installed)
+- [Tech Stack](#tech-stack)
+- [Features](#features)
+- [Project Structure](#project-structure)
+- [Local Development](#local-development)
+- [Environment Variables](#environment-variables)
+- [Service Management](#service-management)
+- [Docker Support](#docker-support)
+- [Nginx Site Config](#nginx-site-config)
+- [API Reference](#api-reference)
+- [License](#license)
+
+---
+
+## Quick Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jacksonm36/CMS/main/install.sh | sudo bash
@@ -22,7 +41,11 @@ HP_CROWDSEC=true \
 curl -fsSL https://raw.githubusercontent.com/jacksonm36/CMS/main/install.sh | sudo bash
 ```
 
-### Install Options
+The installer prints your admin credentials and panel URL at the end. Save them — the password is auto-generated and not stored in plain text after install.
+
+---
+
+## Install Options
 
 | Variable | Default | Description |
 |---|---|---|
@@ -31,27 +54,34 @@ curl -fsSL https://raw.githubusercontent.com/jacksonm36/CMS/main/install.sh | su
 | `HP_DOMAIN` | *(server IP)* | Domain for the panel vhost |
 | `HP_PORT` | `3000` | Web UI port |
 | `HP_API_PORT` | `4000` | API port |
-| `HP_WEBSERVER` | `nginx` | `nginx` \| `apache2` \| `lighttpd` \| `litespeed` |
+| `HP_WEBSERVER` | `nginx` | `nginx` \| `apache2` \| `lighttpd` \| `litespeed` \| `caddy` \| `openresty` \| `traefik` |
 | `HP_CROWDSEC` | `true` | Install CrowdSec security engine |
 | `HP_INSTALL_DIR` | `/opt/hostpanel` | Installation directory |
 | `HP_NODE_VERSION` | `20` | Node.js major version |
 | `HP_STAGING_ACME` | `true` | Use Let's Encrypt staging (set `false` for production) |
+| `HP_DOCKER_ROOTFUL_ONLY` | `false` | Skip rootless Docker attempt (useful for LXC containers) |
+| `HP_DOCKER_FALLBACK_ROOTFUL` | `true` | Fall back to rootful Docker if rootless setup fails |
 
-### Supported Operating Systems
+---
+
+## Supported Operating Systems
 
 | OS | Versions |
 |---|---|
 | Ubuntu | 22.04, 24.04 |
-| Debian | 11, 12 |
+| Debian | 11, 12, 13 (trixie) |
 
-### What Gets Installed
+---
+
+## What Gets Installed
 
 - **Node.js 20 LTS** — via NodeSource
 - **PostgreSQL 16** — application database
 - **Redis 7** — sessions and caching
-- **Web server** — your choice of Nginx, Apache2, Lighttpd, or LiteSpeed Community
+- **Web server** — your choice of Nginx, Apache2, Lighttpd, LiteSpeed Community, Caddy, OpenResty, or Traefik
 - **PHP 8.2 FPM** — for PHP site support (ondrej/sury PPA)
-- **CrowdSec** — collaborative threat intelligence + iptables bouncer
+- **CrowdSec** — collaborative threat intelligence + iptables bouncer *(optional)*
+- **Docker** — rootless (preferred) or rootful, for isolated site containers *(optional)*
 - **HostPanel** — systemd services `hostpanel-api` + `hostpanel-web`
 
 ---
@@ -69,16 +99,18 @@ curl -fsSL https://raw.githubusercontent.com/jacksonm36/CMS/main/install.sh | su
 | Visual Builder | GrapesJS |
 | Terminal | xterm.js |
 | Charts | Recharts |
+| Container Runtime | Docker (rootless or rootful) |
 
 ---
 
 ## Features
 
 ### Web Server Management
-- Install, start, stop, restart, reload Nginx / Apache2 / Lighttpd / LiteSpeed Community
+- Install, start, stop, restart, reload Nginx / Apache2 / Lighttpd / LiteSpeed Community / Caddy / OpenResty / Traefik
 - Each site independently selectable — switch web server per-site at any time
 - Auto-generated config files for each server type (PHP-FPM, Node.js proxy, security headers)
 - Config test runner and live log viewer per server
+- Streaming install progress in the UI
 
 ### SSL Management
 - **Let's Encrypt** — ACME HTTP-01 auto-issue + auto-renewal (30-day pre-expiry)
@@ -108,7 +140,25 @@ curl -fsSL https://raw.githubusercontent.com/jacksonm36/CMS/main/install.sh | su
 - Cron job manager
 - PHP version switcher (8.0 – 8.3)
 - In-browser file manager + Monaco editor + GrapesJS visual builder
-- WebSocket terminal per site
+- WebSocket terminal per site (Docker-isolated when Docker is enabled)
+
+### Site Templates
+- Pre-defined templates for common stacks (PHP, static, Node.js, Python)
+- Per-template web server, runtime version, and database stack selection
+- Traefik templates restricted to Node.js / Python (reverse-proxy only)
+- Admin-managed via the Templates section in the dashboard
+
+### Docker Management
+- Container list with status, image, ports, and uptime
+- Start / stop / restart containers from the UI
+- Rootless Docker preferred (uses `XDG_RUNTIME_DIR` socket); rootful fallback available
+- Per-user `DOCKER_HOST` env var written to `.env` automatically
+- Docker-isolated WebSocket terminals: each site terminal runs inside its own container
+
+### Host Node Management
+- View active Node.js and npm versions on the host
+- Switch Node.js version via the UI (distro package, NodeSource 18/20/22/24)
+- Streaming install progress — watch `apt` and `npm` output in real time
 
 ### Database Management
 - Browse all databases, tables, and rows
@@ -147,13 +197,35 @@ curl -fsSL https://raw.githubusercontent.com/jacksonm36/CMS/main/install.sh | su
 ```
 /
 ├── apps/
-│   ├── web/          # Next.js 15 dashboard (port 3000)
-│   └── api/          # Fastify REST API (port 4000)
+│   ├── web/                  # Next.js 15 dashboard (port 3000)
+│   └── api/                  # Fastify REST API (port 4000)
+│       └── src/modules/
+│           ├── auth/         # Login, 2FA, sessions
+│           ├── content/      # CMS content types & entries
+│           ├── crowdsec/     # CrowdSec integration
+│           ├── database/     # PostgreSQL management
+│           ├── docker/       # Docker container management
+│           ├── host-node/    # Host Node.js version management
+│           ├── integrations/ # Webhooks, API keys, connectors
+│           ├── monitoring/   # Metrics, uptime monitors
+│           ├── redis/        # Redis key browser & CLI
+│           ├── security/     # SSL, WAF, firewall, audit log
+│           ├── site-templates/ # Site template CRUD
+│           ├── sites/        # Site CRUD, file manager, terminal
+│           └── webservers/   # Web server management
 ├── packages/
-│   ├── db/           # Prisma schema + migrations + seed
-│   ├── ui/           # Shared shadcn/ui components
-│   └── types/        # Shared TypeScript interfaces
-├── install.sh        # Bare metal one-line installer
+│   ├── db/                   # Prisma schema + migrations + seed
+│   ├── ui/                   # Shared shadcn/ui components
+│   └── types/                # Shared TypeScript interfaces
+├── deploy/                   # Helper deployment scripts
+│   ├── hostpanel-docker-rootless.sh
+│   ├── hostpanel-install-node.sh
+│   └── hostpanel.sudoers
+├── scripts/                  # Maintenance scripts
+│   ├── ensure-hostpanel-nginx-writable-sites.sh
+│   ├── refresh-systemd-units.sh
+│   └── smoke-test.mjs
+├── install.sh                # Bare metal one-line installer
 └── turbo.json
 ```
 
@@ -166,21 +238,87 @@ curl -fsSL https://raw.githubusercontent.com/jacksonm36/CMS/main/install.sh | su
 - Node.js ≥ 20
 - PostgreSQL 16 running locally
 - Redis 7 running locally
+- *(Optional)* Docker, if you want to test container features
+
+### Steps
 
 ```bash
 git clone https://github.com/jacksonm36/CMS.git
 cd CMS
-cp .env.example .env
-# Edit .env — set DATABASE_URL and REDIS_URL
 
+# Copy and configure environment
+cp .env.example .env
+# Edit .env — at minimum set DATABASE_URL and REDIS_URL
+
+# Install dependencies (root workspace + all packages)
 npm install
-npm run db:generate
-npm run db:migrate
-npm run db:seed
+
+# Set up the database
+npm run db:generate   # generate Prisma client
+npm run db:migrate    # run all migrations
+npm run db:seed       # create the default admin user
+
+# Start in watch mode (web on :3000, API on :4000)
 npm run dev
 ```
 
-Starts both `apps/web` (port 3000) and `apps/api` (port 4000) in watch mode via Turborepo.
+> **Tip:** `npm run dev` uses Turborepo to start both `apps/web` and `apps/api` concurrently in watch mode.
+
+### Useful Scripts
+
+```bash
+npm run build          # production build for all apps
+npm run db:studio      # open Prisma Studio (database GUI)
+npm run db:reset       # drop + recreate schema + re-seed (dev only)
+node scripts/smoke-test.mjs   # basic API health check
+```
+
+---
+
+## Environment Variables
+
+Copy `.env.example` to `.env` and fill in your values. Never commit `.env`.
+
+```bash
+cp .env.example .env
+```
+
+| Variable | Required | Description |
+|---|---|---|
+| `DATABASE_URL` | ✅ | PostgreSQL connection string |
+| `REDIS_URL` | ✅ | Redis connection string |
+| `JWT_SECRET` | ✅ | At least 32 random characters |
+| `JWT_REFRESH_SECRET` | ✅ | At least 32 random characters |
+| `SESSION_SECRET` | ✅ | At least 32 random characters |
+| `NEXTAUTH_SECRET` | ✅ | At least 32 random characters |
+| `NEXTAUTH_URL` | ✅ | Full URL of the web UI (e.g. `http://localhost:3000`) |
+| `NEXT_PUBLIC_API_URL` | ✅ | Full URL of the API (e.g. `http://localhost:4000`) |
+| `ADMIN_EMAIL` | ✅ | Initial admin account email |
+| `ADMIN_PASSWORD` | ✅ | Initial admin account password |
+| `API_PORT` | — | API port (default `4000`) |
+| `PORT` | — | Web UI port (default `3000`) |
+| `CORS_ORIGIN` | — | Allowed CORS origins, comma-separated. Unset = allow all (dev only) |
+| `ACME_EMAIL` | — | Email for Let's Encrypt registration |
+| `ACME_STAGING` | — | `true` = Let's Encrypt staging; `false` = production |
+| `CROWDSEC_API_URL` | — | CrowdSec Local API URL (default `http://127.0.0.1:8080`) |
+| `CROWDSEC_API_KEY` | — | CrowdSec bouncer API key (`sudo cscli bouncers add hostpanel-api`) |
+| `NGINX_SITES_DIR` | — | Writable directory for Nginx vhost files |
+| `CERTS_DIR` | — | Directory for ACME certificates |
+| `MEDIA_DIR` | — | Directory for uploaded media files |
+| `DOCKER_HOST` | — | Docker socket path. Set automatically by `hostpanel-docker-rootless.sh` |
+| `HOSTPANEL_TERMINAL_DOCKER` | — | `true` to run site terminals inside Docker containers |
+| `GITHUB_CLIENT_ID` | — | GitHub OAuth app client ID |
+| `GITHUB_CLIENT_SECRET` | — | GitHub OAuth app client secret |
+| `GOOGLE_CLIENT_ID` | — | Google OAuth client ID |
+| `GOOGLE_CLIENT_SECRET` | — | Google OAuth client secret |
+| `CLOUDFLARE_API_TOKEN` | — | Cloudflare integration API token |
+| `SLACK_WEBHOOK_URL` | — | Slack incoming webhook URL |
+| `S3_ENDPOINT` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` / `S3_BUCKET` | — | S3-compatible storage |
+
+> **Generate secrets quickly:**
+> ```bash
+> node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
+> ```
 
 ---
 
@@ -193,42 +331,183 @@ systemctl status hostpanel-api hostpanel-web
 # Restart
 systemctl restart hostpanel-api hostpanel-web
 
-# Logs
+# Logs (live)
 journalctl -u hostpanel-api -f
 journalctl -u hostpanel-web -f
 
-# Edit config
+# Edit config and apply
 nano /opt/hostpanel/.env
 systemctl restart hostpanel-api hostpanel-web
+
+# Refresh systemd unit files after an update
+sudo bash /opt/hostpanel/scripts/refresh-systemd-units.sh
+```
+
+---
+
+## Docker Support
+
+HostPanel can manage Docker containers from the UI and optionally run each site's terminal inside an isolated container.
+
+### How it works
+
+- **Rootless Docker** (preferred) — runs under the `hostpanel` system user. Uses the user-level socket at `XDG_RUNTIME_DIR/docker.sock`. No root access to the Docker daemon.
+- **Rootful fallback** — if rootless setup fails (e.g. unprivileged LXC), `hostpanel` is added to the `docker` group and uses `/var/run/docker.sock`.
+
+### Setup (already handled by the installer)
+
+If you need to set up Docker manually after installation:
+
+```bash
+sudo bash /opt/hostpanel/deploy/hostpanel-docker-rootless.sh /opt/hostpanel bookworm debian
+```
+
+Replace `bookworm` and `debian` with your OS codename and ID (`lsb_release -cs` / `lsb_release -is`).
+
+### LXC / VPS containers
+
+Rootless Docker requires user namespace support. If you're on an unprivileged LXC container or a VPS that blocks `newuidmap`, set:
+
+```bash
+HP_DOCKER_ROOTFUL_ONLY=true
+```
+
+before running the installer, or pass it to the deploy script.
+
+### Isolated site terminals
+
+Set `HOSTPANEL_TERMINAL_DOCKER=true` in `.env` and restart the API. Each site's WebSocket terminal will then launch inside a fresh `alpine` container scoped to that site's working directory.
+
+---
+
+## Nginx Site Config
+
+The API runs as the `hostpanel` user (non-root) and cannot write to `/etc/nginx/sites-enabled/`. Site vhosts are written to `NGINX_SITES_DIR` (default `/var/lib/hostpanel/nginx-sites`) and pulled in via:
+
+```
+/etc/nginx/conf.d/00-hostpanel-managed-sites.conf  →  include /var/lib/hostpanel/nginx-sites/*.conf;
+```
+
+### Fix missing site configs on existing installs
+
+```bash
+sudo bash /opt/hostpanel/scripts/ensure-hostpanel-nginx-writable-sites.sh
+sudo systemctl restart hostpanel-api
+```
+
+Then open each site in the panel and save (or switch web server) to regenerate its `.conf`, followed by:
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
 ```
 
 ---
 
 ## API Reference
 
-| Endpoint | Description |
-|---|---|
-| `POST /api/auth/login` | Email/password + optional TOTP |
-| `GET /api/sites` | List all sites |
-| `POST /api/sites` | Create site |
-| `PATCH /api/sites/:id/webserver` | Switch web server |
-| `GET /api/sites/:id/files` | Browse file tree |
-| `WS /api/sites/:id/terminal` | WebSocket shell |
-| `GET /api/security/ssl` | List SSL certificates |
-| `POST /api/security/ssl/issue` | Auto Let's Encrypt |
-| `POST /api/security/ssl/import` | Manual PEM import |
-| `GET /api/webservers` | Web server status |
-| `POST /api/webservers/:id/install` | Install a web server |
-| `GET /api/databases/list` | List databases |
-| `POST /api/databases/query` | Run SQL query |
-| `GET /api/redis/keys` | Browse Redis keys |
-| `POST /api/redis/command` | Run Redis command |
-| `GET /api/crowdsec/status` | CrowdSec status |
-| `GET /api/crowdsec/decisions` | Active bans |
-| `POST /api/crowdsec/decisions` | Manually ban IP |
-| `GET /api/monitoring/metrics` | System metrics |
-| `WS /api/monitoring/metrics/stream` | Real-time metrics |
-| `GET /api/content/public/:slug` | Public CMS endpoint |
+All endpoints require a `Bearer <token>` header unless noted otherwise. Obtain a token via `POST /api/auth/login`.
+
+### Auth
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/auth/login` | Email + password + optional TOTP code |
+| `POST` | `/api/auth/refresh` | Refresh access token |
+| `POST` | `/api/auth/logout` | Invalidate session |
+| `GET` | `/api/auth/me` | Current user info |
+
+### Sites
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/sites` | List all sites |
+| `POST` | `/api/sites` | Create site |
+| `GET` | `/api/sites/:id` | Get site details |
+| `PATCH` | `/api/sites/:id` | Update site |
+| `DELETE` | `/api/sites/:id` | Delete site |
+| `PATCH` | `/api/sites/:id/webserver` | Switch web server |
+| `GET` | `/api/sites/:id/files` | Browse file tree |
+| `WS` | `/api/sites/:id/terminal` | WebSocket shell (Docker-isolated if enabled) |
+
+### Web Servers
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/webservers` | Status of all web servers |
+| `POST` | `/api/webservers/:id/install` | Install a web server (streaming) |
+| `POST` | `/api/webservers/:id/action` | Start / stop / restart / reload |
+
+### SSL
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/security/ssl` | List SSL certificates |
+| `POST` | `/api/security/ssl/issue` | Auto Let's Encrypt |
+| `POST` | `/api/security/ssl/import` | Manual PEM import |
+| `DELETE` | `/api/security/ssl/:id` | Revoke and delete |
+
+### Databases
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/databases/list` | List databases |
+| `POST` | `/api/databases/query` | Run SQL query |
+| `POST` | `/api/databases/create` | Create database + user |
+| `DELETE` | `/api/databases/:name` | Drop database |
+
+### Redis
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/redis/keys` | Browse keys (SCAN) |
+| `GET` | `/api/redis/key/:key` | Get key value + TTL |
+| `POST` | `/api/redis/command` | Run Redis command |
+| `DELETE` | `/api/redis/key/:key` | Delete key |
+
+### Docker
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/docker/ping` | Check Docker daemon reachability |
+| `GET` | `/api/docker/containers` | List all containers |
+| `POST` | `/api/docker/containers/:id/action` | Start / stop / restart container |
+
+### Host Node
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/host-node` | Active Node.js + npm versions and paths |
+| `POST` | `/api/host-node/install` | Install Node.js version (streaming SSE) |
+
+### Site Templates
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/site-templates` | List all templates |
+| `POST` | `/api/site-templates` | Create template |
+| `PATCH` | `/api/site-templates/:id` | Update template |
+| `DELETE` | `/api/site-templates/:id` | Delete template |
+
+### CrowdSec
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/crowdsec/status` | CrowdSec daemon status |
+| `GET` | `/api/crowdsec/alerts` | Recent alert feed |
+| `GET` | `/api/crowdsec/decisions` | Active bans/captchas |
+| `POST` | `/api/crowdsec/decisions` | Manually ban IP |
+| `DELETE` | `/api/crowdsec/decisions/:id` | Remove ban |
+
+### Monitoring
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/monitoring/metrics` | Current system metrics snapshot |
+| `WS` | `/api/monitoring/metrics/stream` | Real-time metrics stream |
+| `GET` | `/api/monitoring/uptime` | Uptime monitor list |
+| `POST` | `/api/monitoring/uptime` | Create uptime monitor |
+
+### CMS (Public)
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/content/public/:slug` | Fetch published content entry (no auth) |
+
+### Integrations
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/integrations/webhooks` | List webhooks |
+| `POST` | `/api/integrations/webhooks` | Create webhook |
+| `GET` | `/api/integrations/api-keys` | List scoped API keys |
+| `POST` | `/api/integrations/api-keys` | Create API key |
 
 ---
 

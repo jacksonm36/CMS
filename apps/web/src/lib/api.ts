@@ -1,4 +1,15 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+function resolveApiBase(): string {
+  if (typeof window !== "undefined") {
+    return "";
+  }
+  return (
+    process.env.INTERNAL_API_URL ??
+    process.env.NEXT_PUBLIC_API_URL ??
+    "http://127.0.0.1:4000"
+  );
+}
+
+const API_BASE = resolveApiBase();
 
 class ApiClient {
   private baseUrl: string;
@@ -25,6 +36,7 @@ class ApiClient {
       method,
       headers,
       body: options.body ? JSON.stringify(options.body) : undefined,
+      credentials: typeof window !== "undefined" ? "include" : undefined,
     });
 
     if (res.status === 401) {

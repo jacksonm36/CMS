@@ -2,7 +2,18 @@ import { writeFile, unlink, mkdir } from "fs/promises";
 import { dirname } from "path";
 import type { Site } from "@hostpanel/db";
 
-export type WebServerType = "nginx" | "apache2" | "lighttpd" | "litespeed";
+/** Single source for types, Zod, and UI enumerations */
+export const WEB_SERVER_IDS = [
+  "nginx",
+  "apache2",
+  "lighttpd",
+  "litespeed",
+  "caddy",
+  "openresty",
+  "traefik",
+] as const;
+
+export type WebServerType = (typeof WEB_SERVER_IDS)[number];
 
 export interface WebServerDriver {
   generateConfig(site: Site): string;
@@ -12,11 +23,14 @@ export interface WebServerDriver {
 
 async function getDriver(ws: WebServerType): Promise<WebServerDriver> {
   switch (ws) {
-    case "nginx":     return await import("./nginx.js");
-    case "apache2":   return await import("./apache.js");
-    case "lighttpd":  return await import("./lighttpd.js");
-    case "litespeed": return await import("./litespeed.js");
-    default:          return await import("./nginx.js");
+    case "nginx":      return await import("./nginx.js");
+    case "apache2":    return await import("./apache.js");
+    case "lighttpd":   return await import("./lighttpd.js");
+    case "litespeed":  return await import("./litespeed.js");
+    case "caddy":      return await import("./caddy.js");
+    case "openresty":  return await import("./openresty.js");
+    case "traefik":    return await import("./traefik.js");
+    default:           return await import("./nginx.js");
   }
 }
 
@@ -99,6 +113,36 @@ export const WEB_SERVER_CATALOG: WebServerInfo[] = [
     configDir: "/usr/local/lsws/conf/vhosts",
     serviceName: "lsws",
     supportsPhp: true,
+    supportsProxy: true,
+  },
+  {
+    id: "caddy",
+    name: "Caddy",
+    description: "Automatic HTTPS, HTTP/3, and a concise Caddyfile. Strong choice for modern apps and simple PHP via php_fastcgi.",
+    defaultPort: 80,
+    configDir: "/etc/caddy/conf.d",
+    serviceName: "caddy",
+    supportsPhp: true,
+    supportsProxy: true,
+  },
+  {
+    id: "openresty",
+    name: "OpenResty",
+    description: "Nginx + LuaJIT bundle—nginx-compatible virtual hosts with scripting and high-performance proxying.",
+    defaultPort: 80,
+    configDir: "/etc/openresty/nginx/sites-enabled",
+    serviceName: "openresty",
+    supportsPhp: true,
+    supportsProxy: true,
+  },
+  {
+    id: "traefik",
+    name: "Traefik",
+    description: "Cloud-native reverse proxy with YAML/TOML discovery. Best for Node.js/Python upstreams (file provider snippets).",
+    defaultPort: 80,
+    configDir: "/etc/traefik/dynamic",
+    serviceName: "traefik",
+    supportsPhp: false,
     supportsProxy: true,
   },
 ];

@@ -50,6 +50,16 @@ export default function SettingsPage() {
             <p className="text-sm font-medium capitalize">{user?.role}</p>
           </div>
           <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">Docker access</label>
+            <p className="text-sm font-medium">
+              {user?.role === "superadmin" || user?.role === "admin"
+                ? "Full access (staff)"
+                : user?.dockerAccess
+                  ? "Enabled — you can use the Docker page"
+                  : "Disabled — ask an administrator to enable it for your account"}
+            </p>
+          </div>
+          <div className="space-y-1">
             <label className="text-xs font-medium text-muted-foreground">2FA Status</label>
             <p className={`text-sm font-medium ${user?.twoFactorEnabled ? "text-emerald-400" : "text-muted-foreground"}`}>
               {user?.twoFactorEnabled ? "Enabled" : "Not enabled"}

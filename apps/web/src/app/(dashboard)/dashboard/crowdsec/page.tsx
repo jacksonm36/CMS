@@ -130,7 +130,11 @@ function OverviewTab() {
           Install CrowdSec
         </button>
         {installMutation.isError && <p className="text-xs text-destructive mt-3">{(installMutation.error as Error).message}</p>}
-        {installMutation.data && <pre className="text-xs text-muted-foreground mt-3 text-left bg-secondary/30 rounded p-3 max-h-40 overflow-auto">{(installMutation.data as {output?: string}).output}</pre>}
+        {installMutation.data != null ? (
+          <pre className="text-xs text-muted-foreground mt-3 text-left bg-secondary/30 rounded p-3 max-h-40 overflow-auto">
+            {String((installMutation.data as { output?: string }).output ?? "")}
+          </pre>
+        ) : null}
       </div>
     );
   }
@@ -424,9 +428,11 @@ function HubTab() {
         </button>
       </div>
 
-      {updateMutation.data && (
-        <div className="text-xs bg-secondary/30 rounded-lg p-3 font-mono whitespace-pre-wrap">{(updateMutation.data as {data?: {output?: string}}).data?.output}</div>
-      )}
+      {updateMutation.data != null ? (
+        <div className="text-xs bg-secondary/30 rounded-lg p-3 font-mono whitespace-pre-wrap">
+          {String((updateMutation.data as { data?: { output?: string } }).data?.output ?? "")}
+        </div>
+      ) : null}
 
       <div className="rounded-xl border bg-card overflow-hidden">
         {isLoading ? <div className="p-8 text-center text-sm text-muted-foreground">Loading hub data...</div> : items.length === 0 ? (

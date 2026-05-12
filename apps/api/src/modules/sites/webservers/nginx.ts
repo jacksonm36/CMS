@@ -1,10 +1,12 @@
 import type { Site } from "@hostpanel/db";
+import { appUpstreamPort } from "./proxy-port.js";
 
 export const NGINX_SITES_DIR = process.env.NGINX_SITES_DIR ?? "/etc/nginx/sites-enabled";
 export const NGINX_LOG_DIR = process.env.NGINX_LOG_DIR ?? "/var/log/nginx";
 
 export function generateConfig(site: Site): string {
   const phpSocket = `/run/php/php${site.phpVersion ?? "8.2"}-fpm.sock`;
+  const upstream = appUpstreamPort(site);
 
   const phpBlock = site.type === "php" ? `
     location ~ \\.php$ {
@@ -14,9 +16,11 @@ export function generateConfig(site: Site): string {
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
     }` : "";
 
-  const proxyBlock = site.type === "nodejs" ? `
+  const proxyBlock =
+    site.type === "nodejs" || site.type === "python"
+      ? `
     location / {
-        proxy_pass http://localhost:3000;
+        proxy_pass http://127.0.0.1:${upstream};
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection 'upgrade';
@@ -48,7 +52,7 @@ server {
     location ~ /\\. { deny all; }
     ${phpBlock}
     ${proxyBlock}
-    ${staticBlock}
+    ${site.type === "nodejs" || site.type === "python" ? "" : staticBlock}
 
     access_log ${NGINX_LOG_DIR}/${site.domain}.access.log;
     error_log  ${NGINX_LOG_DIR}/${site.domain}.error.log;
@@ -64,8 +68,13 @@ export async function reload(): Promise<void> {
   const { exec } = await import("child_process");
   const { promisify } = await import("util");
   const execAsync = promisify(exec);
+  /** API systemd unit runs as `hostpanel`; use sudoers-whitelisted nginx (see deploy/hostpanel.sudoers). */
+  const cmd =
+    typeof process.getuid === "function" && process.getuid() === 0
+      ? "nginx -t && nginx -s reload"
+      : "sudo -n /usr/sbin/nginx -t && sudo -n /usr/sbin/nginx -s reload";
   try {
-    await execAsync("nginx -t && nginx -s reload");
+    await execAsync(cmd);
   } catch (err) {
     console.warn("[nginx] Could not reload:", (err as Error).message);
   }

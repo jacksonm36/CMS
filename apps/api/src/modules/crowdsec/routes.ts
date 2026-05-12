@@ -16,7 +16,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { exec } from "child_process";
 import { promisify } from "util";
-import { requireAuth, requireRole } from "../../lib/auth.js";
+import { requireRole } from "../../lib/auth.js";
 
 const execAsync = promisify(exec);
 
@@ -62,7 +62,7 @@ async function runCmd(cmd: string): Promise<{ stdout: string; stderr: string; ok
 
 export async function crowdsecRoutes(app: FastifyInstance) {
   // GET /api/crowdsec/status — agent + LAPI health
-  app.get("/status", { preHandler: requireAuth }, async (_request, reply) => {
+  app.get("/status", { preHandler: requireRole("superadmin", "admin") }, async (_request, reply) => {
     const [heartbeat, agentStatus, bouncerStatus] = await Promise.all([
       csApi("/heartbeat"),
       runCmd("systemctl is-active crowdsec 2>/dev/null || cscli version 2>/dev/null | head -1"),
@@ -88,7 +88,7 @@ export async function crowdsecRoutes(app: FastifyInstance) {
   });
 
   // GET /api/crowdsec/metrics — hub metrics / scenario counts
-  app.get("/metrics", { preHandler: requireAuth }, async (_request, reply) => {
+  app.get("/metrics", { preHandler: requireRole("superadmin", "admin") }, async (_request, reply) => {
     const result = await runCmd("cscli metrics -o json 2>/dev/null || echo '{}'");
     try {
       return reply.send({ success: true, data: JSON.parse(result.stdout) });
@@ -209,7 +209,7 @@ export async function crowdsecRoutes(app: FastifyInstance) {
   });
 
   // GET /api/crowdsec/hub — installed collections & parsers
-  app.get("/hub", { preHandler: requireAuth }, async (_request, reply) => {
+  app.get("/hub", { preHandler: requireRole("superadmin", "admin") }, async (_request, reply) => {
     const [collections, parsers, scenarios, postoverflows] = await Promise.all([
       runCmd("cscli collections list -o json 2>/dev/null || echo '[]'"),
       runCmd("cscli parsers list -o json 2>/dev/null || echo '[]'"),

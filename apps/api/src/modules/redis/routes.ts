@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { requireAuth, requireRole } from "../../lib/auth.js";
+import { requireRole } from "../../lib/auth.js";
 import { getRedis } from "../../lib/redis.js";
 
 const setKeySchema = z.object({
@@ -13,7 +13,7 @@ const setKeySchema = z.object({
 export async function redisRoutes(app: FastifyInstance) {
   // ─── Server info ──────────────────────────────────────────────────────────
 
-  app.get("/info", { preHandler: requireAuth }, async (_request, reply) => {
+  app.get("/info", { preHandler: requireRole("superadmin", "admin") }, async (_request, reply) => {
     try {
       const redis = getRedis();
       const raw = await redis.info();
@@ -26,7 +26,7 @@ export async function redisRoutes(app: FastifyInstance) {
 
   // ─── Memory stats ─────────────────────────────────────────────────────────
 
-  app.get("/memory", { preHandler: requireAuth }, async (_request, reply) => {
+  app.get("/memory", { preHandler: requireRole("superadmin", "admin") }, async (_request, reply) => {
     try {
       const redis = getRedis();
       const raw = await redis.info("memory");
@@ -39,7 +39,7 @@ export async function redisRoutes(app: FastifyInstance) {
 
   // ─── Keyspace stats ───────────────────────────────────────────────────────
 
-  app.get("/keyspace", { preHandler: requireAuth }, async (_request, reply) => {
+  app.get("/keyspace", { preHandler: requireRole("superadmin", "admin") }, async (_request, reply) => {
     try {
       const redis = getRedis();
       const raw = await redis.info("keyspace");
@@ -62,7 +62,7 @@ export async function redisRoutes(app: FastifyInstance) {
 
   // ─── Key browser (SCAN-based, cursor paginated) ────────────────────────────
 
-  app.get("/keys", { preHandler: requireAuth }, async (request, reply) => {
+  app.get("/keys", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
     const query = request.query as { pattern?: string; cursor?: string; count?: string; db?: string };
     const pattern = query.pattern || "*";
     const cursor = query.cursor ?? "0";
@@ -90,7 +90,7 @@ export async function redisRoutes(app: FastifyInstance) {
 
   // ─── Get key value ────────────────────────────────────────────────────────
 
-  app.get("/keys/:key", { preHandler: requireAuth }, async (request, reply) => {
+  app.get("/keys/:key", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
     const { key } = request.params as { key: string };
 
     try {

@@ -1,7 +1,8 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "@hostpanel/db";
-import { requireAuth, requireRole } from "../../lib/auth.js";
+import { requireRole } from "../../lib/auth.js";
+import { verifyWsJwt } from "../../lib/ws-auth.js";
 import { getSystemMetrics, getMetricsHistory } from "./metrics.js";
 
 const uptimeCheckSchema = z.object({
@@ -25,20 +26,26 @@ const alertRuleSchema = z.object({
 export async function monitoringRoutes(app: FastifyInstance) {
   // ─── System Metrics ───────────────────────────────────────────────────────
 
-  app.get("/metrics", { preHandler: requireAuth }, async (_request, reply) => {
+  app.get("/metrics", { preHandler: requireRole("superadmin", "admin") }, async (_request, reply) => {
     const metrics = await getSystemMetrics();
     return reply.send({ success: true, data: metrics });
   });
 
-  app.get("/metrics/history", { preHandler: requireAuth }, async (request, reply) => {
+  app.get("/metrics/history", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
     const query = request.query as { minutes?: string };
     const minutes = Math.min(1440, Number(query.minutes ?? 60));
     const history = await getMetricsHistory(minutes);
     return reply.send({ success: true, data: history });
   });
 
-  // WebSocket stream for real-time metrics
-  app.get("/metrics/stream", { websocket: true }, (socket) => {
+  // WebSocket stream — cookie / Sec-WebSocket-Protocol (`hp.jwt.*`) / deprecated ?token=
+  app.get("/metrics/stream", { websocket: true }, async (socket, req) => {
+    const payload = await verifyWsJwt(app, req);
+    if (!payload || (payload.role !== "superadmin" && payload.role !== "admin")) {
+      socket.close();
+      return;
+    }
+
     const interval = setInterval(async () => {
       try {
         const metrics = await getSystemMetrics();
@@ -53,7 +60,7 @@ export async function monitoringRoutes(app: FastifyInstance) {
 
   // ─── Uptime Checks ────────────────────────────────────────────────────────
 
-  app.get("/uptime", { preHandler: requireAuth }, async (_request, reply) => {
+  app.get("/uptime", { preHandler: requireRole("superadmin", "admin") }, async (_request, reply) => {
     const checks = await prisma.uptimeCheck.findMany({ orderBy: { createdAt: "desc" } });
     return reply.send({ success: true, data: checks });
   });
@@ -81,7 +88,7 @@ export async function monitoringRoutes(app: FastifyInstance) {
     return reply.send({ success: true, message: "Uptime check deleted" });
   });
 
-  app.get("/uptime/:id/results", { preHandler: requireAuth }, async (request, reply) => {
+  app.get("/uptime/:id/results", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const query = request.query as { limit?: string };
     const limit = Math.min(1000, Number(query.limit ?? 100));
@@ -96,7 +103,7 @@ export async function monitoringRoutes(app: FastifyInstance) {
 
   // ─── Alert Rules ──────────────────────────────────────────────────────────
 
-  app.get("/alerts", { preHandler: requireAuth }, async (_request, reply) => {
+  app.get("/alerts", { preHandler: requireRole("superadmin", "admin") }, async (_request, reply) => {
     const rules = await prisma.alertRule.findMany({ orderBy: { createdAt: "desc" } });
     return reply.send({ success: true, data: rules });
   });
