@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Shield, Eye, EyeOff, Loader2 } from "lucide-react";
+import { Shield, Eye, EyeOff, Loader2, Fingerprint } from "lucide-react";
+import { startAuthentication } from "@simplewebauthn/browser";
 import { useAuth } from "@/lib/auth-context";
 import { apiClient } from "@/lib/api";
 import type { AuthSession } from "@hostpanel/types";
@@ -11,11 +12,37 @@ export default function LoginPage() {
   const router = useRouter();
   const { login } = useAuth();
 
-  const [form, setForm] = useState({ email: "", password: "", totpCode: "" });
+  const [form, setForm] = useState({ login: "", password: "", totpCode: "" });
   const [showPassword, setShowPassword] = useState(false);
   const [requires2FA, setRequires2FA] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [passkeyLoading, setPasskeyLoading] = useState(false);
   const [error, setError] = useState("");
+
+  async function handlePasskeyLogin() {
+    setPasskeyLoading(true);
+    setError("");
+    try {
+      const optRes = await apiClient.post<{ data: Record<string, unknown> & { challengeId: string } }>("/auth/passkey/login/options");
+      const { challengeId, ...options } = optRes.data;
+      const credential = await startAuthentication({ optionsJSON: options as any });
+      const res = await apiClient.post<{ success: boolean; data?: AuthSession }>("/auth/passkey/login/verify", {
+        ...credential,
+        challengeId,
+      });
+      if (res.data) {
+        login(res.data.token, res.data.user);
+        router.push("/dashboard");
+      }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Passkey sign-in failed";
+      if (!msg.toLowerCase().includes("cancelled") && !msg.toLowerCase().includes("aborted")) {
+        setError(msg);
+      }
+    } finally {
+      setPasskeyLoading(false);
+    }
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -24,7 +51,7 @@ export default function LoginPage() {
 
     try {
       const res = await apiClient.post<{ success: boolean; requires2FA?: boolean; data?: AuthSession }>("/auth/login", {
-        email: form.email,
+        login: form.login,
         password: form.password,
         ...(requires2FA ? { totpCode: form.totpCode } : {}),
       });
@@ -83,13 +110,14 @@ export default function LoginPage() {
             {!requires2FA ? (
               <>
                 <div className="space-y-1.5">
-                  <label className="text-sm font-medium">Email</label>
+                  <label className="text-sm font-medium">Email or username</label>
                   <input
-                    type="email"
-                    value={form.email}
-                    onChange={(e) => setForm({ ...form, email: e.target.value })}
-                    placeholder="admin@localhost"
+                    type="text"
+                    value={form.login}
+                    onChange={(e) => setForm({ ...form, login: e.target.value })}
+                    placeholder="admin@localhost or username"
                     required
+                    autoComplete="username"
                     className="flex h-10 w-full rounded-lg border border-input bg-secondary/50 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 placeholder:text-muted-foreground"
                   />
                 </div>
@@ -139,7 +167,7 @@ export default function LoginPage() {
               {requires2FA ? "Verify" : "Sign in"}
             </button>
 
-            {requires2FA && (
+                    {requires2FA && (
               <button
                 type="button"
                 onClick={() => { setRequires2FA(false); setForm({ ...form, totpCode: "" }); }}
@@ -149,6 +177,27 @@ export default function LoginPage() {
               </button>
             )}
           </form>
+
+          {!requires2FA && (
+            <>
+              <div className="relative my-4">
+                <div className="absolute inset-0 flex items-center">
+                  <span className="w-full border-t border-border" />
+                </div>
+                <div className="relative flex justify-center text-xs text-muted-foreground">
+                  <span className="bg-card px-2">or</span>
+                </div>
+              </div>
+              <button
+                onClick={handlePasskeyLogin}
+                disabled={passkeyLoading}
+                className="w-full h-10 border border-input bg-secondary/50 hover:bg-accent text-foreground font-medium rounded-lg text-sm transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {passkeyLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Fingerprint className="w-4 h-4" />}
+                Sign in with passkey
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>

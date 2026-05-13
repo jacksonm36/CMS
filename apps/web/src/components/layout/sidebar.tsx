@@ -19,6 +19,7 @@ import {
   ShieldAlert,
   LayoutTemplate,
   Box,
+  Users,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/lib/auth-context";
@@ -59,6 +60,7 @@ export function Sidebar() {
       label: "Ops",
       items: staff
         ? [
+            { href: "/dashboard/users", icon: Users, label: "Users" },
             { href: "/dashboard/security", icon: Shield, label: "Security" },
             { href: "/dashboard/crowdsec", icon: ShieldAlert, label: "CrowdSec" },
             { href: "/dashboard/integrations", icon: Zap, label: "Integrations" },

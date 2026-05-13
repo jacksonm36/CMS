@@ -17,6 +17,7 @@ import {
   Plus,
   Loader2,
 } from "lucide-react";
+import { toast } from "sonner";
 import { apiClient } from "@/lib/api";
 import type { Site } from "@hostpanel/types";
 import { MonacoEditor } from "./monaco-editor";
@@ -73,6 +74,8 @@ export function EditorShell() {
     }
   }, [fileContent]);
 
+  const selectedSite = sites.find((s) => s.id === selectedSiteId);
+
   const saveMutation = useMutation({
     mutationFn: () =>
       apiClient.post(`/sites/${selectedSiteId}/files/write`, { path: currentFile, content }),
@@ -80,6 +83,12 @@ export function EditorShell() {
       setIsDirty(false);
       queryClient.invalidateQueries({ queryKey: ["file-content", selectedSiteId, currentFile] });
       void queryClient.invalidateQueries({ queryKey: ["files", selectedSiteId] });
+      toast.success("File saved", {
+        description: `${selectedSite?.rootPath ?? ""}${currentFile}`,
+      });
+    },
+    onError: (err: Error) => {
+      toast.error("Save failed", { description: err.message });
     },
   });
 
@@ -93,11 +102,18 @@ export function EditorShell() {
       return apiClient.post(`/sites/${selectedSiteId}/files/write`, { path: normalized, content: body });
     },
     onSuccess: async (_, path) => {
+      const normalized = path.startsWith("/") ? path : `/${path}`;
       await queryClient.invalidateQueries({ queryKey: ["files", selectedSiteId] });
-      setCurrentFile(path);
+      setCurrentFile(normalized);
       setMode("code");
       setIsDirty(false);
-      await queryClient.invalidateQueries({ queryKey: ["file-content", selectedSiteId, path] });
+      await queryClient.invalidateQueries({ queryKey: ["file-content", selectedSiteId, normalized] });
+      toast.success("File created", {
+        description: `${selectedSite?.rootPath ?? ""}${normalized}`,
+      });
+    },
+    onError: (err: Error) => {
+      toast.error("Could not create file", { description: err.message });
     },
   });
 
@@ -241,13 +257,13 @@ export function EditorShell() {
             <div className="flex items-center gap-1 text-xs text-muted-foreground truncate w-full justify-center">
               <File className="w-3.5 h-3.5 shrink-0" />
               <span className="truncate font-mono">{currentFile}</span>
-              {isDirty && <span className="w-1.5 h-1.5 bg-amber-400 rounded-full shrink-0" title="Unsaved" />}
+              {isDirty && <span className="w-1.5 h-1.5 bg-amber-400 rounded-full shrink-0" title="Unsaved changes" />}
             </div>
-            <p className="text-[10px] text-muted-foreground/80 truncate w-full text-center max-sm:hidden leading-tight">
-              {mode === "visual"
-                ? "Click anything in the page to edit · Drag blocks from the right · Ctrl+Z / Ctrl+Shift+Z undo · Ctrl+S saves"
-                : "Ctrl+S saves · Expand folders in the sidebar for nested files"}
-            </p>
+            {selectedSite?.rootPath && (
+              <p className="text-[10px] text-muted-foreground/60 truncate w-full text-center leading-tight font-mono">
+                {selectedSite.rootPath}{currentFile}
+              </p>
+            )}
           </div>
 
           <div className="flex items-center gap-1">

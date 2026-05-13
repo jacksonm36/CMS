@@ -2,6 +2,7 @@
 
 import { Bell, LogOut, User, Settings, Moon, Sun } from "lucide-react";
 import { useState } from "react";
+import Link from "next/link";
 import { useAuth } from "@/lib/auth-context";
 import { usePathname } from "next/navigation";
 
@@ -18,6 +19,7 @@ const routeLabels: Record<string, string> = {
   "/dashboard/webservers": "Web Servers",
   "/dashboard/crowdsec": "CrowdSec",
   "/dashboard/docker": "Docker",
+  "/dashboard/users": "Users",
   "/dashboard/settings": "Settings",
 };
 
@@ -83,14 +85,22 @@ export function Header() {
                   <p className="text-sm font-medium truncate">{user?.email}</p>
                   <p className="text-xs text-muted-foreground capitalize">{user?.role}</p>
                 </div>
-                <button className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left transition-colors">
+                <Link
+                  href="/dashboard/settings"
+                  onClick={() => setMenuOpen(false)}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left transition-colors"
+                >
                   <User className="w-4 h-4 text-muted-foreground" />
                   Profile
-                </button>
-                <button className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left transition-colors">
+                </Link>
+                <Link
+                  href="/dashboard/settings"
+                  onClick={() => setMenuOpen(false)}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left transition-colors"
+                >
                   <Settings className="w-4 h-4 text-muted-foreground" />
                   Settings
-                </button>
+                </Link>
                 <div className="border-t my-1" />
                 <button
                   onClick={logout}

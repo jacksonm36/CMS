@@ -8,21 +8,15 @@ import { recordFailedLogin, clearFailedLogins } from "../../middleware/ipBlock.j
 import { requireAuth, requireRole } from "../../lib/auth.js";
 import { HP_TOKEN_COOKIE } from "../../lib/ws-auth.js";
 
-/** Zod's .email() rejects single-label hosts (e.g. admin@localhost) used by default installs. */
-const loginEmail = z
-  .string()
-  .trim()
-  .min(1)
-  .refine(
-    (val) => {
-      if (/^[^\s@]+@localhost$/i.test(val)) return true;
-      return z.string().email().safeParse(val).success;
-    },
-    { message: "Invalid email" }
-  );
+/** Accepts email addresses including single-label hosts like admin@localhost */
+function isValidLoginEmail(val: string) {
+  if (/^[^\s@]+@localhost$/i.test(val)) return true;
+  return z.string().email().safeParse(val).success;
+}
 
 const loginSchema = z.object({
-  email: loginEmail,
+  /** Can be an email address OR a username (display name) */
+  login: z.string().trim().min(1),
   password: z.string().min(1),
   totpCode: z.string().optional(),
 });
@@ -36,6 +30,34 @@ const registerSchema = z.object({
 const changePasswordSchema = z.object({
   currentPassword: z.string(),
   newPassword: z.string().min(8),
+});
+
+const updateProfileSchema = z.object({
+  name: z.string().min(1).max(100).trim().optional(),
+  email: z
+    .string()
+    .trim()
+    .min(1)
+    .refine((v) => isValidLoginEmail(v), { message: "Invalid email" })
+    .optional(),
+}).refine((d) => d.name !== undefined || d.email !== undefined, {
+  message: "Provide at least one field to update",
+});
+
+const adminCreateUserSchema = z.object({
+  email: z.string().email(),
+  name: z.string().min(1).max(100).trim(),
+  password: z.string().min(8),
+  role: z.enum(["superadmin", "admin", "editor", "viewer"]),
+});
+
+const adminUpdateUserSchema = z.object({
+  name: z.string().min(1).max(100).trim().optional(),
+  email: z.string().email().optional(),
+  role: z.enum(["superadmin", "admin", "editor", "viewer"]).optional(),
+  dockerAccess: z.boolean().optional(),
+}).refine((d) => Object.values(d).some((v) => v !== undefined), {
+  message: "Provide at least one field to update",
 });
 
 const verifyTotpSchema = z.object({ code: z.string().length(6) });
@@ -59,9 +81,14 @@ export async function authRoutes(app: FastifyInstance) {
       return reply.status(400).send({ success: false, error: first });
     }
 
-    const { email, password, totpCode } = body.data;
+    const { login, password, totpCode } = body.data;
 
-    const user = await prisma.user.findUnique({ where: { email } });
+    // Find by email first, then fall back to name (username)
+    const isEmail = isValidLoginEmail(login);
+    const user = isEmail
+      ? await prisma.user.findUnique({ where: { email: login } })
+      : await prisma.user.findFirst({ where: { name: { equals: login, mode: "insensitive" } } });
+
     if (!user || !user.passwordHash) {
       await recordFailedLogin(request.ip);
       return reply.status(401).send({ success: false, error: "Invalid credentials" });
@@ -241,5 +268,114 @@ export async function authRoutes(app: FastifyInstance) {
     await prisma.user.update({ where: { id: sub }, data: { passwordHash: newHash } });
 
     return reply.send({ success: true, message: "Password changed successfully" });
+  });
+
+  // PATCH /api/auth/profile — self-service name + email update
+  app.patch("/profile", { preHandler: requireAuth }, async (request, reply) => {
+    const body = updateProfileSchema.safeParse(request.body);
+    if (!body.success) return reply.status(400).send({ success: false, error: body.error.issues[0]?.message ?? "Invalid request" });
+
+    const { sub } = request.user;
+
+    if (body.data.email) {
+      const conflict = await prisma.user.findFirst({ where: { email: body.data.email, NOT: { id: sub } } });
+      if (conflict) return reply.status(409).send({ success: false, error: "Email already in use" });
+    }
+
+    const user = await prisma.user.update({
+      where: { id: sub },
+      data: {
+        ...(body.data.name !== undefined ? { name: body.data.name } : {}),
+        ...(body.data.email !== undefined ? { email: body.data.email } : {}),
+      },
+      select: { id: true, email: true, name: true, role: true, twoFactorEnabled: true, dockerAccess: true },
+    });
+
+    return reply.send({ success: true, data: user });
+  });
+
+  // ─── Admin user management ────────────────────────────────────────────────
+
+  // POST /api/auth/users — admin creates a new user
+  app.post("/users", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
+    const body = adminCreateUserSchema.safeParse(request.body);
+    if (!body.success) return reply.status(400).send({ success: false, error: body.error.issues[0]?.message ?? "Invalid request" });
+
+    const { email, name, password, role } = body.data;
+    const actor = request.user;
+
+    // Admins cannot create superadmins
+    if (role === "superadmin" && actor.role !== "superadmin") {
+      return reply.status(403).send({ success: false, error: "Only superadmins can create superadmin accounts" });
+    }
+
+    const existing = await prisma.user.findUnique({ where: { email } });
+    if (existing) return reply.status(409).send({ success: false, error: "Email already registered" });
+
+    const passwordHash = await bcrypt.hash(password, 12);
+    const user = await prisma.user.create({
+      data: { email, name, passwordHash, role },
+      select: { id: true, email: true, name: true, role: true, dockerAccess: true, createdAt: true },
+    });
+
+    return reply.status(201).send({ success: true, data: user });
+  });
+
+  // PATCH /api/auth/users/:id — admin updates any user
+  app.patch("/users/:id", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = adminUpdateUserSchema.safeParse(request.body);
+    if (!body.success) return reply.status(400).send({ success: false, error: body.error.issues[0]?.message ?? "Invalid request" });
+
+    const actor = request.user;
+
+    // Cannot demote/promote to superadmin unless you are one
+    if (body.data.role === "superadmin" && actor.role !== "superadmin") {
+      return reply.status(403).send({ success: false, error: "Only superadmins can assign the superadmin role" });
+    }
+
+    const target = await prisma.user.findUnique({ where: { id } });
+    if (!target) return reply.status(404).send({ success: false, error: "User not found" });
+
+    // Admins cannot edit superadmins
+    if (target.role === "superadmin" && actor.role !== "superadmin") {
+      return reply.status(403).send({ success: false, error: "Insufficient permissions to modify this user" });
+    }
+
+    if (body.data.email) {
+      const conflict = await prisma.user.findFirst({ where: { email: body.data.email, NOT: { id } } });
+      if (conflict) return reply.status(409).send({ success: false, error: "Email already in use" });
+    }
+
+    const user = await prisma.user.update({
+      where: { id },
+      data: {
+        ...(body.data.name !== undefined ? { name: body.data.name } : {}),
+        ...(body.data.email !== undefined ? { email: body.data.email } : {}),
+        ...(body.data.role !== undefined ? { role: body.data.role } : {}),
+        ...(body.data.dockerAccess !== undefined ? { dockerAccess: body.data.dockerAccess } : {}),
+      },
+      select: { id: true, email: true, name: true, role: true, dockerAccess: true, createdAt: true },
+    });
+
+    return reply.send({ success: true, data: user });
+  });
+
+  // DELETE /api/auth/users/:id — admin deletes a user
+  app.delete("/users/:id", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const actor = request.user;
+
+    if (id === actor.sub) return reply.status(400).send({ success: false, error: "You cannot delete your own account" });
+
+    const target = await prisma.user.findUnique({ where: { id } });
+    if (!target) return reply.status(404).send({ success: false, error: "User not found" });
+
+    if (target.role === "superadmin" && actor.role !== "superadmin") {
+      return reply.status(403).send({ success: false, error: "Only superadmins can delete superadmin accounts" });
+    }
+
+    await prisma.user.delete({ where: { id } });
+    return reply.send({ success: true, message: "User deleted" });
   });
 }

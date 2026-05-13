@@ -5,6 +5,7 @@ import { prisma } from "@hostpanel/db";
 import { canAccessSite } from "../../lib/site-access.js";
 import { verifyWsJwt } from "../../lib/ws-auth.js";
 import { userMayUseDockerExec } from "../../lib/docker-access.js";
+import { sanitizeDockerExecWorkdir, spawnDockerInteractiveShell, isValidDockerContainerIdRef } from "../../lib/docker-cli.js";
 
 /** Site-scoped shell: JWT via cookie / Sec-WebSocket-Protocol / deprecated ?token= */
 export async function terminalRoutes(app: FastifyInstance): Promise<void> {
@@ -42,14 +43,13 @@ export async function terminalRoutes(app: FastifyInstance): Promise<void> {
         process.platform !== "win32";
 
       if (useDocker && site.dockerContainerId) {
-        const workdir = process.env.HOSTPANEL_DOCKER_SITE_WORKDIR ?? "/srv";
-        shell = spawn(
-          "docker",
-          ["exec", "-i", "-w", workdir, site.dockerContainerId, "/bin/sh"],
-          {
-            env: { ...process.env, TERM: "xterm-256color" },
-          }
-        );
+        if (!isValidDockerContainerIdRef(site.dockerContainerId)) {
+          socket.send("\r\n\x1b[31mInvalid container reference — cannot open terminal\x1b[0m\r\n");
+          socket.close();
+          return;
+        }
+        const workdir = sanitizeDockerExecWorkdir(process.env.HOSTPANEL_DOCKER_SITE_WORKDIR ?? "/srv", "/srv");
+        shell = spawnDockerInteractiveShell(site.dockerContainerId, workdir);
       } else {
         const isWindows = process.platform === "win32";
         shell = isWindows
@@ -67,18 +67,29 @@ export async function terminalRoutes(app: FastifyInstance): Promise<void> {
       shell.stdout.on("data", (data: Buffer) => socket.send(data.toString("utf-8")));
       shell.stderr.on("data", (data: Buffer) => socket.send(data.toString("utf-8")));
 
+      shell.on("error", (err) => {
+        try {
+          const msg = err instanceof Error ? err.message : String(err);
+          socket.send(`\r\n\x1b[31mShell process error: ${msg}\x1b[0m\r\n`);
+        } catch {
+          /* ignore */
+        }
+        socket.close();
+      });
+
       shell.on("exit", () => {
         socket.send("\r\n\x1b[33mShell exited\x1b[0m\r\n");
         socket.close();
       });
 
-      socket.on("message", (data: Buffer) => {
-        if (shell && !shell.killed) {
-          shell.stdin.write(data.toString("utf-8"));
-        }
+      socket.on("message", (raw: Buffer | string) => {
+        if (!shell || shell.killed) return;
+        const chunk = typeof raw === "string" ? raw : raw.toString("utf8");
+        shell.stdin.write(chunk);
       });
     } catch (err) {
-      socket.send(`\r\n\x1b[31mCould not spawn shell: ${err}\x1b[0m\r\n`);
+      const msg = err instanceof Error ? err.message : String(err);
+      socket.send(`\r\n\x1b[31mCould not spawn shell: ${msg}\x1b[0m\r\n`);
     }
 
     socket.on("close", () => {

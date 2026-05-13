@@ -9,6 +9,7 @@ import staticFiles from "@fastify/static";
 import { isAbsolute, join, resolve } from "path";
 
 import { authRoutes } from "./modules/auth/routes.js";
+import { passkeyRoutes } from "./modules/auth/passkey.js";
 import { sitesRoutes } from "./modules/sites/routes.js";
 import { terminalRoutes } from "./modules/sites/terminal.js";
 import { databaseRoutes } from "./modules/database/routes.js";
@@ -83,6 +84,7 @@ app.get("/health", async () => ({ status: "ok", timestamp: new Date().toISOStrin
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
 await app.register(authRoutes, { prefix: "/api/auth" });
+await app.register(passkeyRoutes, { prefix: "/api/auth/passkey" });
 await app.register(sitesRoutes, { prefix: "/api/sites" });
 await app.register(terminalRoutes, { prefix: "/api/sites" });
 await app.register(securityRoutes, { prefix: "/api/security" });

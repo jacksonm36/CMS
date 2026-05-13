@@ -11,6 +11,14 @@ export interface WsJwtPayload {
   role: Role;
 }
 
+export interface VerifyWsJwtOptions {
+  /**
+   * When false, `?token=` is not accepted (reduces token leakage via Referer, logs, and shared URLs).
+   * Cookie and `Sec-WebSocket-Protocol` (`hp.jwt.…`) still work. Default true for backwards compatibility.
+   */
+  allowQueryToken?: boolean;
+}
+
 function decodeProtoJwt(header: string | undefined): string | null {
   if (!header) return null;
   for (const raw of header.split(",")) {
@@ -35,13 +43,15 @@ function decodeProtoJwt(header: string | undefined): string | null {
  */
 export async function verifyWsJwt(
   app: FastifyInstance,
-  request: FastifyRequest
+  request: FastifyRequest,
+  options?: VerifyWsJwtOptions
 ): Promise<WsJwtPayload | null> {
+  const allowQuery = options?.allowQueryToken !== false;
   const cookieTok = request.cookies?.[HP_TOKEN_COOKIE];
   const proto = request.headers["sec-websocket-protocol"];
   const protoJoined = Array.isArray(proto) ? proto.join(",") : proto;
   const fromProto = decodeProtoJwt(protoJoined);
-  const queryTok = (request.query as { token?: string }).token;
+  const queryTok = allowQuery ? (request.query as { token?: string }).token : undefined;
 
   const ordered = [cookieTok, fromProto, queryTok].filter((x): x is string => Boolean(x));
 

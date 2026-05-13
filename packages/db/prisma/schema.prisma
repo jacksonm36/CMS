@@ -25,11 +25,12 @@ model User {
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
-  sites           Site[]       @relation("SiteOwner")
-  apiKeys         ApiKey[]
-  auditLogs       AuditLog[]
-  contentEntries  ContentEntry[]
-  mediaFiles      MediaFile[]
+  sites                Site[]       @relation("SiteOwner")
+  apiKeys              ApiKey[]
+  auditLogs            AuditLog[]
+  contentEntries       ContentEntry[]
+  mediaFiles           MediaFile[]
+  webAuthnCredentials  WebAuthnCredential[]
 
   @@index([email])
   @@map("users")
@@ -40,6 +41,27 @@ enum Role {
   admin
   editor
   viewer
+}
+
+// ─── WebAuthn / Passkeys ──────────────────────────────────────────────────────
+
+model WebAuthnCredential {
+  id           String    @id @default(cuid())
+  userId       String
+  credentialId String    @unique
+  publicKey    Bytes
+  counter      BigInt    @default(0)
+  deviceType   String    @default("singleDevice")
+  backedUp     Boolean   @default(false)
+  transports   String[]
+  name         String    @default("Passkey")
+  createdAt    DateTime  @default(now())
+  lastUsedAt   DateTime?
+
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("webauthn_credentials")
 }
 
 // ─── Sites ────────────────────────────────────────────────────────────────────

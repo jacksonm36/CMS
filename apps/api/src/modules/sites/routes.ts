@@ -491,18 +491,20 @@ export async function sitesRoutes(app: FastifyInstance) {
 
   // PATCH /api/sites/:id/crons/:cronId
   app.patch("/:id/crons/:cronId", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
-    const { cronId } = request.params as { id: string; cronId: string };
+    const { id, cronId } = request.params as { id: string; cronId: string };
     const body = z.object({ enabled: z.boolean().optional(), schedule: z.string().optional(), command: z.string().optional() }).safeParse(request.body);
     if (!body.success) return reply.status(400).send({ success: false, error: body.error.message });
 
-    const cron = await prisma.cronJob.update({ where: { id: cronId }, data: body.data });
+    // Scope to siteId to prevent IDOR across sites
+    const cron = await prisma.cronJob.update({ where: { id: cronId, siteId: id }, data: body.data });
     return reply.send({ success: true, data: cron });
   });
 
   // DELETE /api/sites/:id/crons/:cronId
   app.delete("/:id/crons/:cronId", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
-    const { cronId } = request.params as { id: string; cronId: string };
-    await prisma.cronJob.delete({ where: { id: cronId } });
+    const { id, cronId } = request.params as { id: string; cronId: string };
+    // Scope to siteId to prevent IDOR across sites
+    await prisma.cronJob.delete({ where: { id: cronId, siteId: id } });
     return reply.send({ success: true, message: "Cron job deleted" });
   });
 }

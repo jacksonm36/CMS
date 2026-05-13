@@ -10,8 +10,11 @@ interface FileEntry {
 }
 
 function guardPath(rootPath: string, userPath: string): string {
-  const full = resolve(join(rootPath, userPath));
-  if (!full.startsWith(resolve(rootPath))) {
+  const root = resolve(rootPath);
+  const full = resolve(join(root, userPath));
+  // Require full path to equal root exactly OR be strictly under root/
+  // Without the trailing separator check, a root of /foo/bar would match /foo/barsomethingelse
+  if (full !== root && !full.startsWith(root + "/")) {
     throw new Error("Path traversal detected");
   }
   return full;

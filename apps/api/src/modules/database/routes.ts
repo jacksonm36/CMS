@@ -21,6 +21,8 @@ const querySchema = z.object({
   sql: z.string().min(1).max(50000),
 });
 
+const SAFE_DB_IDENTIFIER = /^[a-zA-Z][a-zA-Z0-9_]{0,62}$/;
+
 const createDbSchema = z.object({
   name: z.string().regex(/^[a-zA-Z0-9_]+$/, "Only alphanumeric and underscores"),
   engine: z.enum(["postgresql", "mysql"]),
@@ -77,6 +79,9 @@ export async function databaseRoutes(app: FastifyInstance) {
 
   app.delete("/:name", { preHandler: requireRole("superadmin") }, async (request, reply) => {
     const { name } = request.params as { name: string };
+    if (!SAFE_DB_IDENTIFIER.test(name)) {
+      return reply.status(400).send({ success: false, error: "Invalid database name" });
+    }
     const query = request.query as { engine?: string; connectionId?: string };
 
     try {
@@ -215,6 +220,9 @@ export async function databaseRoutes(app: FastifyInstance) {
 
   app.delete("/users/:username", { preHandler: requireRole("superadmin") }, async (request, reply) => {
     const { username } = request.params as { username: string };
+    if (!SAFE_DB_IDENTIFIER.test(username)) {
+      return reply.status(400).send({ success: false, error: "Invalid username" });
+    }
     const query = request.query as { connectionId?: string };
     try {
       await queryPostgres(`DROP USER IF EXISTS "${username}";`, query.connectionId);
