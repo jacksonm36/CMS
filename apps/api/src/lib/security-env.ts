@@ -64,6 +64,17 @@ export function assertProductionSecrets(): void {
   }
 }
 
+/** Fail fast in production so operators set an explicit browser origin list (see .env.example). */
+export function assertProductionCors(): void {
+  if (process.env.NODE_ENV !== "production") return;
+  const origins = process.env.CORS_ORIGIN?.split(",").map((s) => s.trim()).filter(Boolean) ?? [];
+  if (origins.length === 0) {
+    throw new Error(
+      "[HostPanel] CORS_ORIGIN must be set in production (comma-separated origins, e.g. https://panel.example.com or http://192.168.1.10:3000 for LAN).",
+    );
+  }
+}
+
 /**
  * CORS for browser clients with credentials. In production, **require** `CORS_ORIGIN`
  * (comma-separated allowed origins); otherwise cross-origin API calls are denied.
@@ -74,9 +85,7 @@ export function corsOriginConfig(): boolean | string[] {
     : [];
   if (origins.length > 0) return origins;
   if (process.env.NODE_ENV === "production") {
-    console.warn(
-      "[HostPanel] CORS_ORIGIN not set — browser cross-origin requests to this API will be denied. Set CORS_ORIGIN=https://your-panel.example.com"
-    );
+    // assertProductionCors() should forbid startup without CORS_ORIGIN in production
     return false;
   }
   return true;

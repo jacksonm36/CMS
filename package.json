@@ -15,7 +15,7 @@
     "db:studio": "turbo run db:studio --filter=@hostpanel/db",
     "db:seed": "npm run db:seed -w @hostpanel/db",
     "test": "node ./scripts/smoke-test.mjs",
-    "test:smoke": "node ./scripts/smoke-test.mjs"
+    "test:files": "npm run test:files -w @hostpanel/api"
   },
   "devDependencies": {
     "turbo": "^2.3.3",

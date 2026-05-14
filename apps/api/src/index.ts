@@ -30,6 +30,7 @@ import { startMonitoringWorker } from "./modules/monitoring/worker.js";
 import { startCronWorker } from "./modules/sites/cron-worker.js";
 import {
   assertProductionSecrets,
+  assertProductionCors,
   applyHttpSecurityHeaders,
   corsOriginConfig,
   getJwtSecret,
@@ -43,6 +44,7 @@ import { runMigrateDeployIfEnabled } from "./lib/prisma-migrate-on-start.js";
 
 await runMigrateDeployIfEnabled();
 assertProductionSecrets();
+assertProductionCors();
 
 const app = Fastify({
   logger: {

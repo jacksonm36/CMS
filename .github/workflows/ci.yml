@@ -60,6 +60,9 @@ jobs:
       - name: Typecheck
         run: npm run typecheck --if-present
 
+      - name: Site file path guard tests
+        run: npm run test:files --if-present
+
       - name: Build
         run: npm run build
         env:

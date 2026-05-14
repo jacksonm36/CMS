@@ -32,6 +32,12 @@
 #    HP_DOCKER_TRY_ROOTLESS=true      (pass through: set false with ROOTFUL_ONLY to skip rootless)
 #    HP_DOCKER_FALLBACK_ROOTFUL=true  (default: if rootless fails, install rootful docker-ce)
 #    HP_RESTART_HOSTPANEL_API=true    (restart hostpanel-api after Docker .env changes; set false to skip)
+#
+#  Verification (optional — air-gapped / supply-chain hygiene):
+#    HP_EXPECTED_GIT_COMMIT=full40hex   After clone/pull, abort if `git rev-parse HEAD` does not match.
+#    (Requires a git checkout — use a normal clone; not the local rsync copy-from-tree path without .git.)
+#    To verify this script before `curl | bash`, download first and check SHA-256 against a published
+#    checksum (e.g. GitHub release notes):  curl -fsSL URL -o install.sh && sha256sum install.sh
 # =============================================================================
 
 set -euo pipefail
@@ -67,6 +73,7 @@ HP_DOCKER_ROOTFUL_ONLY="${HP_DOCKER_ROOTFUL_ONLY:-false}"
 HP_DOCKER_TRY_ROOTLESS="${HP_DOCKER_TRY_ROOTLESS:-true}"
 HP_DOCKER_FALLBACK_ROOTFUL="${HP_DOCKER_FALLBACK_ROOTFUL:-true}"
 HP_RESTART_HOSTPANEL_API="${HP_RESTART_HOSTPANEL_API:-true}"
+HP_EXPECTED_GIT_COMMIT="${HP_EXPECTED_GIT_COMMIT:-}"
 HP_JWT_SECRET="$(openssl rand -base64 48 | tr -d '=+/')"
 HP_SESSION_SECRET="$(openssl rand -base64 48 | tr -d '=+/')"
 HP_NEXTAUTH_SECRET="$(openssl rand -base64 48 | tr -d '=+/')"
@@ -449,6 +456,15 @@ fi
 # Repository owned by the service user
 chown -R "${HP_SERVICE_USER}:${HP_SERVICE_USER}" "$HP_INSTALL_DIR"
 
+if [[ -n "$HP_EXPECTED_GIT_COMMIT" ]]; then
+  step "Verifying repository commit (HP_EXPECTED_GIT_COMMIT)"
+  _hp_head="$(git -C "$HP_INSTALL_DIR" rev-parse HEAD 2>/dev/null || echo "")"
+  if [[ "$_hp_head" != "$HP_EXPECTED_GIT_COMMIT" ]]; then
+    error "Repository commit mismatch: expected HP_EXPECTED_GIT_COMMIT=$HP_EXPECTED_GIT_COMMIT but got ${_hp_head:-empty}"
+  fi
+  success "Repository commit matches HP_EXPECTED_GIT_COMMIT"
+fi
+
 # ─── 8b. Panel hostname / IP (browser URL for NextAuth, CORS, optional Nginx vhost) ──
 normalize_panel_host() {
   local h="$1"
@@ -675,8 +691,8 @@ SUDOERS
 fi
 success "System user and sudoers configured"
 
-# Site vhosts must be writable by the panel service user — not under /etc/nginx/sites-enabled.
-step "HostPanel-managed nginx site directory"
+# Site vhosts must be writable by User=hostpanel — not under /etc/nginx/sites-enabled.
+step "HostPanel-managed nginx site directory (writable by hostpanel user)"
 HP_NGX_SITES="${HP_SERVICE_HOME}/nginx-sites"
 mkdir -p "$HP_NGX_SITES"
 chown "${HP_SERVICE_USER}:${HP_SERVICE_USER}" "$HP_NGX_SITES"
