@@ -13,8 +13,11 @@ import { requireAuth } from "../../lib/auth.js";
 import { getRedis } from "../../lib/redis.js";
 import { recordFailedLogin } from "../../middleware/ipBlock.js";
 import { HP_TOKEN_COOKIE } from "../../lib/ws-auth.js";
+import { checkRpIdOriginAlignment } from "./webauthn-rp.js";
 
 const CHALLENGE_TTL = 300; // 5 minutes
+
+let warnedRpOriginMisaligned = false;
 
 /**
  * Derive rpID and allowed origins for a given request.
@@ -24,8 +27,9 @@ const CHALLENGE_TTL = 300; // 5 minutes
  *  2. Auto-detected from the request's Origin header (dev / LAN / any URL the user is actually on)
  *  3. Fall back to NEXTAUTH_URL hostname
  *
- * This means passkeys just work regardless of whether the user is on localhost,
- * an IP, a local domain, or a public HTTPS domain.
+ * RP ID must be a **domain** (not a bare IP). LAN installs often use **nip.io**-style hostnames; those depend on
+ * DNS resolving correctly — set explicit WEBAUTHN_RP_ID / WEBAUTHN_ORIGIN to match the URL users type. For
+ * production, prefer a real FQDN and HTTPS. See also HOSTPANEL_WEBAUTHN_REQUIRE_EXPLICIT in .env.example.
  */
 export function getRpConfig(requestOrigin?: string) {
   const fallbackOrigin = process.env.NEXTAUTH_URL ?? "http://localhost:3000";
@@ -54,6 +58,12 @@ export function getRpConfig(requestOrigin?: string) {
   const allowedOrigins = [effectiveOrigin, fallbackOrigin, ...extraOrigins].filter(
     (o, i, a) => o && a.indexOf(o) === i, // deduplicate + remove empty
   );
+
+  const align = checkRpIdOriginAlignment(rpID, allowedOrigins);
+  if (!align.ok && !warnedRpOriginMisaligned) {
+    warnedRpOriginMisaligned = true;
+    console.warn(`[HostPanel] WebAuthn RP/origin: ${align.detail}`);
+  }
 
   return { rpName: process.env.WEBAUTHN_RP_NAME ?? "HostPanel", rpID, allowedOrigins };
 }

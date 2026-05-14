@@ -140,6 +140,18 @@ export function assertSafeCronCommand(command: string): { ok: true } | { ok: fal
   return { ok: true };
 }
 
+export function assertWebAuthnExplicitIfRequired(): void {
+  if (process.env.NODE_ENV !== "production") return;
+  if (process.env.HOSTPANEL_WEBAUTHN_REQUIRE_EXPLICIT !== "true") return;
+  const rp = process.env.WEBAUTHN_RP_ID?.trim();
+  const wo = process.env.WEBAUTHN_ORIGIN?.trim();
+  if (!rp || !wo) {
+    throw new Error(
+      "[HostPanel] HOSTPANEL_WEBAUTHN_REQUIRE_EXPLICIT=true requires WEBAUTHN_RP_ID and WEBAUTHN_ORIGIN (see .env.example).",
+    );
+  }
+}
+
 /** When true, POST /api/databases/query only allows read-style statements (SELECT, WITH, EXPLAIN, …). */
 export function isSqlEditorReadOnly(): boolean {
   return process.env.HOSTPANEL_SQL_EDITOR_READ_ONLY === "true";

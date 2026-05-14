@@ -31,6 +31,7 @@ import { startCronWorker } from "./modules/sites/cron-worker.js";
 import {
   assertProductionSecrets,
   assertProductionCors,
+  assertWebAuthnExplicitIfRequired,
   applyHttpSecurityHeaders,
   corsOriginConfig,
   getJwtSecret,
@@ -41,10 +42,13 @@ import {
 } from "./lib/security-env.js";
 import { getRedis } from "./lib/redis.js";
 import { runMigrateDeployIfEnabled } from "./lib/prisma-migrate-on-start.js";
+import { warnWebAuthnDeploymentIssues } from "./modules/auth/webauthn-rp.js";
 
 await runMigrateDeployIfEnabled();
 assertProductionSecrets();
 assertProductionCors();
+assertWebAuthnExplicitIfRequired();
+warnWebAuthnDeploymentIssues();
 
 const app = Fastify({
   logger: {
