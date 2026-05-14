@@ -1,4 +1,5 @@
 # HostPanel — passwordless sudo for the panel API user (web servers + apt installs)
+# Site cron jobs (DB-driven) must NOT invoke sudo/apt — enforced in API (see assertSafeCronCommand).
 # Installed to /etc/sudoers.d/hostpanel by install.sh
 hostpanel ALL=(ALL) NOPASSWD: /usr/sbin/nginx, \
   /usr/sbin/apache2ctl, /usr/sbin/apachectl, \

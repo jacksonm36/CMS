@@ -93,10 +93,32 @@ export function corsOriginConfig(): boolean | string[] {
 
 /** Set `HOSTPANEL_CRON_DISABLED=true` on the API host to disable all scheduled cron command execution (incident containment). */
 
-/** Cron commands execute as the HostPanel API OS user — constrain shell injection / abuse. */
+/**
+ * Cron commands are executed as the HostPanel API user (`hostpanel`), which has passwordless sudo for **specific**
+ * binaries (see `deploy/hostpanel.sudoers`). User-defined crons must not invoke `sudo`, package managers, or
+ * `systemctl` — those are for the panel only. Set `HOSTPANEL_CRON_ALLOW_PRIVILEGED_COMMANDS=true` to disable this
+ * gate (dangerous; operators accept full risk).
+ */
 export const CRON_COMMAND_MAX_LEN = 4096;
 
 const CRON_CTRL_EXCEPT_TAB = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
+
+/** Substrings that must not appear in site cron commands (case-insensitive), unless escape hatch env is set. */
+const CRON_PRIVILEGED_PATTERNS: { re: RegExp; error: string }[] = [
+  { re: /\bsudo\b/i, error: "Cron commands cannot use sudo" },
+  { re: /\bdoas\b/i, error: "Cron commands cannot use doas" },
+  { re: /\bpkexec\b/i, error: "Cron commands cannot use pkexec" },
+  { re: /\bapt-get\b/i, error: "Cron commands cannot run apt-get" },
+  { re: /\bapt\s+(install|update|upgrade|remove|purge|full-upgrade|dist-upgrade)\b/i, error: "Cron commands cannot run apt" },
+  { re: /\baptitude\b/i, error: "Cron commands cannot run aptitude" },
+  { re: /(?:^|[\s;|&`"'])\/usr\/bin\/apt\b/i, error: "Cron commands cannot run the apt binary" },
+  { re: /\bdpkg\b/i, error: "Cron commands cannot run dpkg" },
+  { re: /\bsystemctl\b/i, error: "Cron commands cannot run systemctl" },
+];
+
+function cronPrivilegedCommandsAllowed(): boolean {
+  return process.env.HOSTPANEL_CRON_ALLOW_PRIVILEGED_COMMANDS === "true";
+}
 
 export function assertSafeCronCommand(command: string): { ok: true } | { ok: false; error: string } {
   const cmd = command.trim();
@@ -109,6 +131,11 @@ export function assertSafeCronCommand(command: string): { ok: true } | { ok: fal
   }
   if (CRON_CTRL_EXCEPT_TAB.test(command)) {
     return { ok: false, error: "Command contains disallowed control characters" };
+  }
+  if (!cronPrivilegedCommandsAllowed()) {
+    for (const { re, error } of CRON_PRIVILEGED_PATTERNS) {
+      if (re.test(command)) return { ok: false, error };
+    }
   }
   return { ok: true };
 }

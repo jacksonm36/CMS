@@ -7,12 +7,22 @@ const scheduledTasks = new Map<string, cron.ScheduledTask>();
 
 const CRON_TIMEOUT_MS = 30_000;
 
+function cronSpawnEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env } as NodeJS.ProcessEnv;
+  /** Predictable PATH — ignore user-controlled PATH prefix tricks inside cron commands */
+  env.PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+  delete env.LD_PRELOAD;
+  delete env.LD_AUDIT;
+  delete env.LD_DEBUG;
+  return env;
+}
+
 function runCronShell(command: string): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     let settled = false;
     const child = spawn("/bin/bash", ["-lc", command], {
       stdio: ["ignore", "pipe", "pipe"],
-      env: process.env,
+      env: cronSpawnEnv(),
     });
     let stdout = "";
     let stderr = "";
