@@ -6,7 +6,8 @@ Report sensitive issues privately to the repository maintainer (do not open a pu
 
 ## Secrets and configuration
 
-- **Never commit** `.env` or production credentials. The installer writes `/opt/hostpanel/.env` as root-only (`chmod 600`) and injects strong random values for JWT, session, NextAuth-style, and refresh-related secrets.
+- The installer sets `.env` to **`chmod 640` `root:<service user>`** so the panel user can read it for installs and tooling; systemd still loads variables for the service.
+- **Never commit** `.env` or production credentials. The installer writes `/opt/hostpanel/.env` with strong random values for JWT, session, NextAuth-style, and refresh-related secrets.
 - **Production** requires `NODE_ENV=production` on the API (systemd sets this) with a `JWT_SECRET` of at least 32 characters. The installer satisfies this automatically.
 - **CORS**: `CORS_ORIGIN` should list every browser origin that calls the API with credentials (the installer sets this to match the panel URL).
 - **Let's Encrypt**: Default installer setting uses **production** ACME (`HP_STAGING_ACME=false`). Use `HP_STAGING_ACME=true` only when testing certificate issuance.
@@ -18,7 +19,7 @@ Report sensitive issues privately to the repository maintainer (do not open a pu
 
 ## Dependency hygiene
 
-- CI and the installer CI and the installer run **`npm audit --audit-level=critical`** (blocking). A follow-up step prints **high**-severity findings (often transitive from Next.js / GrapesJS) for awareness — track upstream updates and `npm audit fix` when safe.
+- CI and the installer run **`npm audit --audit-level=critical`** (blocking). A follow-up step prints **high**-severity findings (often transitive from Next.js / GrapesJS) for awareness — track upstream updates and `npm audit fix` when safe.
 - Prefer **`npm ci`** on locked installs for reproducible builds.
 
 ## Host hardening (installer)

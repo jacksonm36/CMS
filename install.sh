@@ -19,6 +19,8 @@
 #    HP_CROWDSEC=true                 (install CrowdSec, default true)
 #    HP_DB_PASSWORD=...               (PostgreSQL password, auto-generated if empty)
 #    HP_INSTALL_DIR=/opt/hostpanel    (installation directory)
+#    HP_SERVICE_USER=hostpanel        (Linux account that owns app files; default hostpanel)
+#    HP_SERVICE_HOME=/var/lib/hostpanel  (home directory for that account)
 #    HP_NODE_VERSION=20               (Node.js major version)
 #    HP_SKIP_WEBSERVER=false          (skip web server install entirely)
 #    HP_SKIP_DOCKER=false             (skip Docker install entirely)
@@ -71,6 +73,8 @@ HP_NEXTAUTH_SECRET="$(openssl rand -base64 48 | tr -d '=+/')"
 HP_JWT_REFRESH_SECRET="$(openssl rand -base64 48 | tr -d '=+/')"
 HP_DOMAIN="${HP_DOMAIN:-}"
 HP_SKIP_PANEL_HOST_PROMPT="${HP_SKIP_PANEL_HOST_PROMPT:-false}"
+HP_SERVICE_USER="${HP_SERVICE_USER:-hostpanel}"
+HP_SERVICE_HOME="${HP_SERVICE_HOME:-/var/lib/hostpanel}"
 
 REPO_URL="${HP_REPO_URL:-https://github.com/jacksonm36/CMS}"
 REPO_BRANCH="${HP_REPO_BRANCH:-main}"
@@ -85,7 +89,7 @@ cat <<'BANNER'
  |_| |_|\___/|___/\__|_|   \__,_|_| |_|\___|_|
 
 BANNER
-echo -e "${NC}  Bare Metal Installer — v1.1.0\n"
+echo -e "${NC}  Bare Metal Installer — v1.2.0\n"
 
 # ─── Root check ───────────────────────────────────────────────────────────────
 [[ $EUID -ne 0 ]] && error "This script must be run as root. Use: sudo bash install.sh"
@@ -176,6 +180,17 @@ wait_for_port() {
   [[ $tries -gt 0 ]] || warn "Port $port did not become available in time"
 }
 
+# ─── Validate service account name ────────────────────────────────────────────
+if [[ ! "$HP_SERVICE_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+  error "HP_SERVICE_USER must be a valid lowercase Linux username (got: $HP_SERVICE_USER)"
+fi
+
+# Run commands as the HostPanel service user (npm, prisma, build — not root)
+panel_exec() {
+  sudo -H -u "$HP_SERVICE_USER" env HOME="$HP_SERVICE_HOME" "PATH=$PATH" \
+    bash -lc "set -euo pipefail; cd \"$HP_INSTALL_DIR\" && $1"
+}
+
 # ─── 1. System update + core deps ─────────────────────────────────────────────
 step "Updating package lists and installing core dependencies"
 
@@ -183,7 +198,7 @@ $PKG_MGR update -qq
 
 # Universal core — available on all supported distros
 pkg_install_required curl wget gnupg2 lsb-release ca-certificates \
-  build-essential git unzip openssl
+  build-essential git unzip openssl sudo
 
 # Netcat — package name differs by distro
 pkg_install netcat-openbsd || pkg_install netcat-traditional || true
@@ -393,6 +408,21 @@ if [[ "$HP_CROWDSEC" == "true" ]]; then
   fi
 fi
 
+# ─── 7b. Service user (before clone — repo owned by app user, not root) ───────
+step "Creating system user '$HP_SERVICE_USER'"
+if ! id -u "$HP_SERVICE_USER" &>/dev/null; then
+  mkdir -p "$HP_SERVICE_HOME"
+  useradd --system --home-dir "$HP_SERVICE_HOME" --create-home --shell /usr/sbin/nologin "$HP_SERVICE_USER"
+  success "Linux user '$HP_SERVICE_USER' created (home $HP_SERVICE_HOME)"
+else
+  mkdir -p "$HP_SERVICE_HOME"
+  chown "${HP_SERVICE_USER}:${HP_SERVICE_USER}" "$HP_SERVICE_HOME"
+  if [[ "$(getent passwd "$HP_SERVICE_USER" | cut -d: -f6)" != "$HP_SERVICE_HOME" ]]; then
+    usermod -d "$HP_SERVICE_HOME" "$HP_SERVICE_USER" 2>/dev/null || true
+  fi
+  success "Linux user '$HP_SERVICE_USER' already exists — refreshed home $HP_SERVICE_HOME"
+fi
+
 # ─── 8. Clone / update HostPanel ──────────────────────────────────────────────
 step "Installing HostPanel to $HP_INSTALL_DIR"
 
@@ -415,6 +445,9 @@ else
     git clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" "$HP_INSTALL_DIR"
   fi
 fi
+
+# Repository owned by the service user
+chown -R "${HP_SERVICE_USER}:${HP_SERVICE_USER}" "$HP_INSTALL_DIR"
 
 # ─── 8b. Panel hostname / IP (browser URL for NextAuth, CORS, optional Nginx vhost) ──
 normalize_panel_host() {
@@ -556,7 +589,7 @@ CERTS_DIR="${HP_INSTALL_DIR}/certs"
 ACME_WEBROOT="/var/www"
 
 # ─── Web servers ────────────────────────────────────────────────────────────────
-NGINX_SITES_DIR="/var/lib/hostpanel/nginx-sites"
+NGINX_SITES_DIR="${HP_SERVICE_HOME}/nginx-sites"
 APACHE_SITES_DIR="/etc/apache2/sites-enabled"
 LIGHTTPD_CONF_DIR="/etc/lighttpd/conf-enabled"
 LSWS_VHOSTS_DIR="/usr/local/lsws/conf/vhosts"
@@ -573,94 +606,85 @@ MEDIA_DIR="${HP_INSTALL_DIR}/uploads"
 HOSTPANEL_AUTO_MIGRATE=true
 ENV
 
-chmod 600 "$HP_INSTALL_DIR/.env"
-success "Environment file written to $HP_INSTALL_DIR/.env"
+chown "root:${HP_SERVICE_USER}" "$HP_INSTALL_DIR/.env"
+chmod 640 "$HP_INSTALL_DIR/.env"
+success "Environment file written to $HP_INSTALL_DIR/.env (group-readable by $HP_SERVICE_USER)"
 
-# ─── 10. npm install + build ──────────────────────────────────────────────────
-step "Installing npm dependencies"
+# ─── 10. npm install + build (as $HP_SERVICE_USER, not root) ─────────────────
+step "Installing npm dependencies (user: $HP_SERVICE_USER)"
 
-cd "$HP_INSTALL_DIR"
 if [[ -f package-lock.json ]]; then
   info "Running npm ci (lockfile) — reproducible production deps..."
-  npm ci || error "npm ci failed — check package-lock.json vs package.json"
+  panel_exec "npm ci" || error "npm ci failed — check package-lock.json vs package.json"
 else
   info "Running npm install (no package-lock.json)..."
-  npm install --prefer-offline || error "npm install failed"
+  panel_exec "npm install --prefer-offline" || error "npm install failed"
 fi
 
 step "npm audit (critical)"
 set +e
-npm audit --audit-level=critical --omit=dev 2>&1 | tail -40
+sudo -H -u "$HP_SERVICE_USER" env HOME="$HP_SERVICE_HOME" "PATH=$PATH" \
+  bash -lc "cd "$HP_INSTALL_DIR" && npm audit --audit-level=critical --omit=dev" 2>&1 | tail -40
 AUDIT_EC=${PIPESTATUS[0]}
 set -e
 if [[ $AUDIT_EC -ne 0 ]]; then
   if [[ "${HP_NPM_AUDIT_FAIL}" == "true" ]]; then
     error "npm audit failed (critical). Fix vulns or set HP_NPM_AUDIT_FAIL=false to continue."
   else
-    warn "npm audit reported critical issues — review with: cd ${HP_INSTALL_DIR} && npm audit; apply npm audit fix where safe"
+    warn "npm audit reported critical issues — review with: cd ${HP_INSTALL_DIR} && sudo -u $HP_SERVICE_USER npm audit"
   fi
 fi
 
 step "Generating Prisma client"
-npm run db:generate || error "Prisma generate failed"
+panel_exec "npm run db:generate" || error "Prisma generate failed"
 
 step "Running database migrations"
-npm run db:migrate || error "Database migration failed"
+panel_exec "npm run db:migrate" || error "Database migration failed"
 
 step "Seeding initial admin account"
-npm run db:seed || warn "Seed script failed (database may already be seeded)"
+panel_exec "npm run db:seed" || warn "Seed script failed (database may already be seeded)"
 
 step "Building production bundle (Next.js + API)"
-NODE_ENV=production npm run build || error "Production build failed"
-success "Build complete"
+sudo -H -u "$HP_SERVICE_USER" env HOME="$HP_SERVICE_HOME" "PATH=$PATH" NODE_ENV=production \
+  bash -lc "set -euo pipefail; cd "$HP_INSTALL_DIR" && npm run build" || error "Production build failed"
+success "Build complete (files owned by $HP_SERVICE_USER)"
 
-# ─── 11. Create system user ───────────────────────────────────────────────────
-step "Creating system user 'hostpanel'"
+# ─── 11. Ownership, uploads, and .env permissions ─────────────────────────────
+step "Ensuring install tree is owned by '$HP_SERVICE_USER'"
 
-if ! id -u hostpanel &>/dev/null; then
-  mkdir -p /var/lib/hostpanel
-  useradd --system --home-dir /var/lib/hostpanel --create-home --shell /usr/sbin/nologin hostpanel
-else
-  mkdir -p /var/lib/hostpanel
-  chown hostpanel:hostpanel /var/lib/hostpanel
-  if [[ "$(getent passwd hostpanel | cut -d: -f6)" != "/var/lib/hostpanel" ]]; then
-    usermod -d /var/lib/hostpanel hostpanel 2>/dev/null || true
-  fi
-fi
-
-chown -R hostpanel:hostpanel "$HP_INSTALL_DIR"
+chown -R "${HP_SERVICE_USER}:${HP_SERVICE_USER}" "$HP_INSTALL_DIR"
 mkdir -p "$HP_INSTALL_DIR/uploads" "$HP_INSTALL_DIR/certs"
-chown hostpanel:hostpanel "$HP_INSTALL_DIR/uploads" "$HP_INSTALL_DIR/certs"
+chown "${HP_SERVICE_USER}:${HP_SERVICE_USER}" "$HP_INSTALL_DIR/uploads" "$HP_INSTALL_DIR/certs"
 
-# Secrets: keep .env root-owned mode 600 so only root reads it; systemd still loads
-# EnvironmentFile= into hostpanel-api / hostpanel-web as root before dropping privileges.
-chown root:root "$HP_INSTALL_DIR/.env"
-chmod 600 "$HP_INSTALL_DIR/.env"
+chown "root:${HP_SERVICE_USER}" "$HP_INSTALL_DIR/.env"
+chmod 640 "$HP_INSTALL_DIR/.env"
 
-# Allow hostpanel to reload web servers, install packages, etc. (sudoers)
+# Allow service user to reload web servers, install packages, etc. (sudoers file lists "hostpanel" — substitute if HP_SERVICE_USER differs)
 SUDOERS_FILE="/etc/sudoers.d/hostpanel"
 SUDOERS_SRC="${HP_INSTALL_DIR}/deploy/hostpanel.sudoers"
 if [[ -f "$SUDOERS_SRC" ]]; then
-  install -m 440 -o root -g root "$SUDOERS_SRC" "$SUDOERS_FILE"
+  sed "s/^hostpanel /${HP_SERVICE_USER} /" "$SUDOERS_SRC" > /tmp/hostpanel-sudoers.gen
+  install -m 440 -o root -g root /tmp/hostpanel-sudoers.gen "$SUDOERS_FILE"
+  rm -f /tmp/hostpanel-sudoers.gen
 else
   warn "Missing $SUDOERS_SRC — writing minimal sudoers fallback"
-  cat > "$SUDOERS_FILE" <<'SUDOERS'
-hostpanel ALL=(ALL) NOPASSWD: /usr/sbin/nginx, /usr/bin/apt-get
+  cat > "$SUDOERS_FILE" <<SUDOERS
+${HP_SERVICE_USER} ALL=(ALL) NOPASSWD: /usr/sbin/nginx, /usr/bin/apt-get
 SUDOERS
   chmod 440 "$SUDOERS_FILE"
 fi
 success "System user and sudoers configured"
 
-# Site vhosts must be writable by User=hostpanel — not under /etc/nginx/sites-enabled.
-step "HostPanel-managed nginx site directory (writable by hostpanel user)"
-HP_NGX_SITES="/var/lib/hostpanel/nginx-sites"
+# Site vhosts must be writable by the panel service user — not under /etc/nginx/sites-enabled.
+step "HostPanel-managed nginx site directory"
+HP_NGX_SITES="${HP_SERVICE_HOME}/nginx-sites"
 mkdir -p "$HP_NGX_SITES"
-chown hostpanel:hostpanel "$HP_NGX_SITES"
+chown "${HP_SERVICE_USER}:${HP_SERVICE_USER}" "$HP_NGX_SITES"
 chmod 755 "$HP_NGX_SITES"
 if [[ -d /etc/nginx/conf.d ]]; then
-  cat > /etc/nginx/conf.d/00-hostpanel-managed-sites.conf <<'NGXINC'
-# HostPanel — per-site vhosts written by the `hostpanel` user (NGINX_SITES_DIR in HostPanel .env)
-include /var/lib/hostpanel/nginx-sites/*.conf;
+  cat > /etc/nginx/conf.d/00-hostpanel-managed-sites.conf <<NGXINC
+# HostPanel — per-site vhosts (NGINX_SITES_DIR; user ${HP_SERVICE_USER})
+include ${HP_NGX_SITES}/*.conf;
 NGXINC
   chmod 644 /etc/nginx/conf.d/00-hostpanel-managed-sites.conf
   if command -v nginx &>/dev/null; then
@@ -680,8 +704,8 @@ if [[ "$HP_SKIP_DOCKER" != "true" && "$HP_DOCKER_ROOTLESS" == "true" ]]; then
     export HP_DOCKER_ROOTFUL_ONLY HP_DOCKER_TRY_ROOTLESS HP_DOCKER_FALLBACK_ROOTFUL HP_RESTART_HOSTPANEL_API HP_PULL_ALPINE HOSTPANEL_ALPINE_IMAGE
     bash "$DOCKER_SCRIPT" "$HP_INSTALL_DIR" "$OS_CODENAME" "$OS_ID" \
       || warn "Rootless Docker setup exited non-zero — check output; you can re-run: sudo bash $DOCKER_SCRIPT $HP_INSTALL_DIR $OS_CODENAME $OS_ID"
-    chown root:root "$HP_INSTALL_DIR/.env" 2>/dev/null || true
-    chmod 600 "$HP_INSTALL_DIR/.env" 2>/dev/null || true
+    chown "root:${HP_SERVICE_USER}" "$HP_INSTALL_DIR/.env" 2>/dev/null || true
+    chmod 640 "$HP_INSTALL_DIR/.env" 2>/dev/null || true
   else
     warn "Missing $DOCKER_SCRIPT — skipping Docker install"
   fi
@@ -719,8 +743,8 @@ Wants=postgresql.service redis.service
 
 [Service]
 Type=simple
-User=hostpanel
-Group=hostpanel
+User=${HP_SERVICE_USER}
+Group=${HP_SERVICE_USER}
 WorkingDirectory=${HP_INSTALL_DIR}/apps/api
 EnvironmentFile=${HP_INSTALL_DIR}/.env
 Environment=NODE_ENV=production
@@ -751,8 +775,8 @@ Wants=hostpanel-api.service
 
 [Service]
 Type=simple
-User=hostpanel
-Group=hostpanel
+User=${HP_SERVICE_USER}
+Group=${HP_SERVICE_USER}
 WorkingDirectory=${HP_INSTALL_DIR}/apps/web
 EnvironmentFile=${HP_INSTALL_DIR}/.env
 Environment=NODE_ENV=production
@@ -874,7 +898,7 @@ ${HP_INSTALL_DIR}/logs/*.log {
     compress
     delaycompress
     notifempty
-    create 0640 hostpanel hostpanel
+    create 0640 ${HP_SERVICE_USER} ${HP_SERVICE_USER}
 }
 LOGROTATE
 

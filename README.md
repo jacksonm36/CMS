@@ -51,7 +51,7 @@ The installer asks for the **panel hostname or LAN IP** when run interactively (
 
 ### Production installer behaviour
 
-The bare-metal script performs a **locked install** when `package-lock.json` is present (`npm ci`), runs **`npm audit`** at **critical** severity (set `HP_NPM_AUDIT_FAIL=true` to abort the install on any critical finding), prints high-severity advisories for awareness, generates cryptographically strong secrets (JWT, session, **NEXTAUTH_SECRET**, **JWT_REFRESH_SECRET**), configures **WebAuthn** `rpID` automatically (using **nip.io** when you access the panel by IPv4), enables **ufw** and (by default) **fail2ban**, and sets **`HOSTPANEL_AUTO_MIGRATE=true`** so the API runs Prisma migrations at startup.
+The bare-metal script creates a dedicated Linux user (`HP_SERVICE_USER`, default `hostpanel`), **`chown`s the repository to that user**, and runs **`npm ci` / build / Prisma as that user (not root)**. It performs a **locked install** when `package-lock.json` is present (`npm ci`), runs **`npm audit`** at **critical** severity (set `HP_NPM_AUDIT_FAIL=true` to abort the install on any critical finding), prints high-severity advisories for awareness, generates cryptographically strong secrets (JWT, session, **NEXTAUTH_SECRET**, **JWT_REFRESH_SECRET**), configures **WebAuthn** `rpID` automatically (using **nip.io** when you access the panel by IPv4), enables **ufw** and (by default) **fail2ban**, and sets **`HOSTPANEL_AUTO_MIGRATE=true`** so the API runs Prisma migrations at startup.
 
 See [SECURITY.md](SECURITY.md) for secrets handling, webhooks, and hardening overview).
 
@@ -66,6 +66,8 @@ See [SECURITY.md](SECURITY.md) for secrets handling, webhooks, and hardening ove
 | `HP_WEBSERVER` | `nginx` | `nginx` \| `apache2` \| `lighttpd` \| `litespeed` \| `caddy` \| `openresty` \| `traefik` |
 | `HP_CROWDSEC` | `true` | Install CrowdSec security engine |
 | `HP_INSTALL_DIR` | `/opt/hostpanel` | Installation directory |
+| `HP_SERVICE_USER` | `hostpanel` | Linux account that owns the install directory and runs the API/web processes |
+| `HP_SERVICE_HOME` | `/var/lib/hostpanel` | Home directory for that account (npm cache, etc.) |
 | `HP_NODE_VERSION` | `20` | Node.js major version |
 | `HP_STAGING_ACME` | `false` | Let's Encrypt **production** by default; set `true` for staging only |
 | `HP_FAIL2BAN` | `true` | Install **fail2ban** for SSH (set `false` to skip) |
