@@ -11,7 +11,9 @@ concurrency:
   cancel-in-progress: true
 
 # NODE_ENV must not be "production" during npm ci — npm omits devDependencies (eslint, prisma CLI support, etc.)
+# GitHub Actions: run official JS actions on Node 24 (Node 20 runner runtime is deprecated).
 env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   JWT_SECRET: ci-build-jwt-secret-min-32-chars-minimum-length-ok
   JWT_REFRESH_SECRET: ci-build-jwt-refresh-secret-min-32-characters-zz
   SESSION_SECRET: ci-build-session-secret-min-32-chars-min-length-aa
@@ -28,16 +30,19 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
 
       - name: Install dependencies
         run: npm ci
+        env:
+          # Ensure devDependencies (turbo, eslint, prisma CLI, etc.) are installed in CI.
+          NODE_ENV: development
 
       - name: Audit (critical — must be clean)
         run: npm audit --audit-level=critical --omit=dev
