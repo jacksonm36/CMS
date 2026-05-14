@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { X } from "lucide-react";
 import { getBrowserApiWebSocketBase } from "@/lib/browser-api-origin";
 import { jwtToWebSocketProtocol } from "@/lib/ws-jwt-protocol";
 

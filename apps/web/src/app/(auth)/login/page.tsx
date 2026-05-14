@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Shield, Eye, EyeOff, Loader2, Fingerprint } from "lucide-react";
-import { startAuthentication } from "@simplewebauthn/browser";
+import { startAuthentication, type PublicKeyCredentialRequestOptionsJSON } from "@simplewebauthn/browser";
 import { useAuth } from "@/lib/auth-context";
 import { apiClient } from "@/lib/api";
 import type { AuthSession } from "@hostpanel/types";
@@ -25,7 +25,9 @@ export default function LoginPage() {
     try {
       const optRes = await apiClient.post<{ data: Record<string, unknown> & { challengeId: string } }>("/auth/passkey/login/options");
       const { challengeId, ...options } = optRes.data;
-      const credential = await startAuthentication({ optionsJSON: options as any });
+      const credential = await startAuthentication({
+        optionsJSON: options as unknown as PublicKeyCredentialRequestOptionsJSON,
+      });
       const res = await apiClient.post<{ success: boolean; data?: AuthSession }>("/auth/passkey/login/verify", {
         ...credential,
         challengeId,

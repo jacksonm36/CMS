@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useMemo, useState, useEffect, useCallback } from "react";
 import { useSearchParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -46,7 +46,7 @@ export function EditorShell() {
   const [isDirty, setIsDirty] = useState(false);
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(() => new Set());
   const [showTerminal, setShowTerminal] = useState(false);
-  const [terminalHeight, setTerminalHeight] = useState(200);
+  const [terminalHeight] = useState(200);
 
   const { data: sitesData } = useQuery({
     queryKey: ["sites"],
@@ -55,7 +55,7 @@ export function EditorShell() {
 
   const [selectedSiteId, setSelectedSiteId] = useState(siteId ?? "");
 
-  const sites = sitesData?.data ?? [];
+  const sites = useMemo(() => sitesData?.data ?? [], [sitesData?.data]);
   useEffect(() => {
     if (!selectedSiteId && sites.length > 0) setSelectedSiteId(sites[0]!.id);
   }, [sites, selectedSiteId]);

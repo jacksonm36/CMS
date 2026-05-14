@@ -5,7 +5,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ShieldAlert, ShieldCheck, ShieldOff, RefreshCw, Download,
   Trash2, Plus, Terminal, AlertTriangle, Activity, Package,
-  ChevronDown, ChevronRight, Loader2, Ban, Globe,
+  ChevronDown, ChevronRight, Loader2, Ban,
 } from "lucide-react";
 import { apiClient } from "@/lib/api";
 
@@ -87,7 +87,7 @@ export default function CrowdSecPage() {
 function OverviewTab() {
   const queryClient = useQueryClient();
 
-  const { data, isLoading, error } = useQuery({
+  const { data, isLoading } = useQuery({
     queryKey: ["cs-status"],
     queryFn: () => apiClient.get<{ data: CrowdSecStatus }>("/crowdsec/status"),
     refetchInterval: 15000,
@@ -295,11 +295,6 @@ function DecisionsTab() {
   const banMutation = useMutation({
     mutationFn: (form: typeof banForm) => apiClient.post("/crowdsec/decisions", form),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["cs-decisions"] }); setShowBan(false); },
-  });
-
-  const unbanMutation = useMutation({
-    mutationFn: (id: number) => apiClient.delete(`/crowdsec/decisions/${id}`),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["cs-decisions"] }),
   });
 
   const unbanIpMutation = useMutation({

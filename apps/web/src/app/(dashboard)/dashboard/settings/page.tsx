@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { User, Shield, Key, Loader2, Check, Fingerprint, Trash2, Pencil, X } from "lucide-react";
-import { startRegistration } from "@simplewebauthn/browser";
+import { startRegistration, type PublicKeyCredentialCreationOptionsJSON } from "@simplewebauthn/browser";
 import { useAuth } from "@/lib/auth-context";
 import { apiClient } from "@/lib/api";
 
@@ -230,9 +230,9 @@ function PasskeysPanel() {
     setRegError("");
     setRegistering(true);
     try {
-      const optRes = await apiClient.get<{ data: Record<string, unknown> }>("/auth/passkey/register/options");
+      const optRes = await apiClient.get<{ data: PublicKeyCredentialCreationOptionsJSON }>("/auth/passkey/register/options");
       const options = optRes.data;
-      const credential = await startRegistration({ optionsJSON: options as any });
+      const credential = await startRegistration({ optionsJSON: options });
       await apiClient.post("/auth/passkey/register/verify", {
         ...credential,
         passkeyName: passkeyName.trim() || "Passkey",

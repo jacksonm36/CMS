@@ -284,7 +284,9 @@ function KeyBrowserTab() {
           {loadingKeys ? (
             <div className="p-4 space-y-2">{Array.from({ length: 8 }).map((_, i) => <div key={i} className="h-8 bg-muted animate-pulse rounded" />)}</div>
           ) : keys.length === 0 ? (
-            <div className="p-8 text-center text-xs text-muted-foreground">No keys matching "{pattern}"</div>
+            <div className="p-8 text-center text-xs text-muted-foreground">
+              No keys matching <span className="font-mono text-foreground/80">&quot;{pattern}&quot;</span>
+            </div>
           ) : (
             <>
               {keys.map((entry) => (

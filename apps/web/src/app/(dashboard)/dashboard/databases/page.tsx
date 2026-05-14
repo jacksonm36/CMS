@@ -7,10 +7,9 @@ import {
   Table2, Users, BarChart2, Terminal as TerminalIcon, RefreshCw, AlertTriangle,
   Fingerprint, KeyRound,
 } from "lucide-react";
-import { startAuthentication } from "@simplewebauthn/browser";
+import { startAuthentication, type PublicKeyCredentialRequestOptionsJSON } from "@simplewebauthn/browser";
 import { apiClient, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
-import { formatBytes } from "@/lib/utils";
 import type { DbConnection, DbDatabase, DbTable, DbTableRows, DbQueryResult, DbStats, DbUser } from "@hostpanel/types";
 import { MonacoEditor } from "@/components/editor/monaco-editor";
 
@@ -433,7 +432,9 @@ function QueryTab({ connectionId }: { connectionId: string }) {
         "/auth/sql-editor/passkey/options",
       );
       const { challengeId, ...options } = optRes.data;
-      const credential = await startAuthentication({ optionsJSON: options as any });
+      const credential = await startAuthentication({
+        optionsJSON: options as unknown as PublicKeyCredentialRequestOptionsJSON,
+      });
       const res = await apiClient.post<{
         success: boolean;
         data?: { elevationToken: string; expiresInSec: number };

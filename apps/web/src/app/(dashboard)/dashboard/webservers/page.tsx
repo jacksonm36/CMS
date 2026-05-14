@@ -549,7 +549,6 @@ function WebServerCard({
   installStreamRunning: boolean;
   installStreamActiveId: WebServerType | null;
 }) {
-  const queryClient = useQueryClient();
   const colors = WS_COLORS[ws.id as WebServerType] ?? WS_COLORS.nginx;
   const [logOpen, setLogOpen] = useState(false);
   const [logType, setLogType] = useState<"error" | "access">("error");

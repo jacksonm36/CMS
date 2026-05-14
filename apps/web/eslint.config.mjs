@@ -11,9 +11,11 @@ const compat = new FlatCompat({
 });
 
 /** @type {import("eslint").Linter.Config[]} */
-export default [
+const config = [
   ...compat.extends("next/core-web-vitals", "next/typescript"),
   {
     ignores: [".next/**", "out/**", "build/**", "next-env.d.ts", "node_modules/**"],
   },
 ];
+
+export default config;

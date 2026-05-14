@@ -90,7 +90,7 @@ function SslTab() {
 
   const importMutation = useMutation({
     mutationFn: (payload: typeof importForm) => apiClient.post("/security/ssl/import", payload),
-    onSuccess: (res) => {
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["ssl-certs"] });
       setImportResult({ ok: true, message: "Certificate imported successfully" });
       setTimeout(() => setMode("list"), 2000);
@@ -106,12 +106,12 @@ function SslTab() {
     <div className="space-y-4">
       <div className="flex items-center gap-3 mb-2">
         <button onClick={() => setMode("list")} className="text-xs text-muted-foreground hover:text-foreground">← Back</button>
-        <h3 className="font-semibold">Issue Let's Encrypt Certificate</h3>
+        <h3 className="font-semibold">Issue {"Let's Encrypt"} Certificate</h3>
       </div>
       <div className="rounded-xl border bg-card p-6 space-y-5 max-w-lg">
         <div className="flex items-start gap-3 bg-blue-500/5 border border-blue-500/20 rounded-lg p-4 text-xs text-blue-300">
           <Info className="w-4 h-4 shrink-0 mt-0.5" />
-          <p>Make sure your domain's DNS A record points to this server's IP. The ACME HTTP-01 challenge requires port 80 to be accessible from the internet.</p>
+          <p>Make sure your domain{"'"}s DNS A record points to this server{"'"}s IP. The ACME HTTP-01 challenge requires port 80 to be accessible from the internet.</p>
         </div>
 
         <div className="space-y-4">
@@ -211,14 +211,14 @@ function SslTab() {
       <div className="flex items-center justify-between p-5 border-b border-border">
         <div>
           <h3 className="font-semibold">SSL Certificates</h3>
-          <p className="text-sm text-muted-foreground">Let's Encrypt auto-issue or manual PEM import</p>
+          <p className="text-sm text-muted-foreground">{"Let's Encrypt"} auto-issue or manual PEM import</p>
         </div>
         <div className="flex gap-2">
           <button onClick={() => setMode("import")} className="flex items-center gap-1.5 px-3 py-1.5 text-xs border rounded-lg hover:bg-accent transition-colors">
             <ClipboardPaste className="w-3.5 h-3.5" /> Paste / Import
           </button>
           <button onClick={() => setMode("auto")} className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors">
-            <Zap className="w-3.5 h-3.5" /> Auto (Let's Encrypt)
+            <Zap className="w-3.5 h-3.5" /> Auto ({"Let's Encrypt"})
           </button>
         </div>
       </div>
@@ -231,7 +231,7 @@ function SslTab() {
           <p className="text-muted-foreground text-sm mb-4">No certificates yet</p>
           <div className="flex items-center justify-center gap-3">
             <button onClick={() => setMode("auto")} className="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm hover:bg-primary/90">
-              <Zap className="w-3.5 h-3.5" /> Let's Encrypt
+              <Zap className="w-3.5 h-3.5" /> {"Let's Encrypt"}
             </button>
             <button onClick={() => setMode("import")} className="flex items-center gap-2 px-4 py-2 border rounded-lg text-sm hover:bg-accent">
               <ClipboardPaste className="w-3.5 h-3.5" /> Import PEM

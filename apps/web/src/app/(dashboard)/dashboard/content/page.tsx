@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { FileText, Plus, Trash2, Edit, Eye, Image, Database } from "lucide-react";
+import { FileText, Plus, Trash2, Edit, Eye, Image as ImageIcon, Database } from "lucide-react";
 import { apiClient } from "@/lib/api";
 import { formatRelative } from "@/lib/utils";
 import type { ContentType, ContentEntry, PaginatedResponse, MediaFile } from "@hostpanel/types";
@@ -15,7 +15,7 @@ export default function ContentPage() {
   const tabs: { id: Tab; label: string; icon: React.ElementType }[] = [
     { id: "entries", label: "Entries", icon: FileText },
     { id: "types", label: "Content Types", icon: Database },
-    { id: "media", label: "Media Library", icon: Image },
+    { id: "media", label: "Media Library", icon: ImageIcon },
   ];
 
   return (
@@ -300,7 +300,7 @@ function MediaTab() {
 
       {files.length === 0 ? (
         <div className="rounded-xl border bg-card p-12 text-center">
-          <Image className="w-10 h-10 text-muted-foreground mx-auto mb-3" />
+          <ImageIcon className="w-10 h-10 text-muted-foreground mx-auto mb-3" aria-hidden />
           <p className="text-muted-foreground text-sm">No media files yet</p>
         </div>
       ) : (
