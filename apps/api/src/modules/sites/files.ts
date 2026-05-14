@@ -1,5 +1,32 @@
-import { readdir, readFile as fsReadFile, writeFile as fsWriteFile, stat, mkdir, realpath } from "fs/promises";
+import {
+  access,
+  readdir,
+  readFile as fsReadFile,
+  writeFile as fsWriteFile,
+  stat,
+  mkdir,
+  realpath,
+  lstat,
+} from "fs/promises";
+import { constants as fsConstants } from "fs";
 import { join, resolve, relative, dirname, sep } from "path";
+
+/**
+ * Site file I/O — path confinement to `site.rootPath`.
+ *
+ * **Symlinks:** `guardPathResolved` + a second `realpath()` immediately before read reduce (not eliminate) TOCTOU
+ * between validation and open. Full symlink hardening for untrusted local attackers typically needs
+ * `O_NOFOLLOW` (breaks intentional in-tree symlinks) or a filesystem mounted `nosymfollow` / separate volume.
+ *
+ * **Hard links:** `realpath()` does not “escape” to `/etc/passwd` for a hard link — the canonical path stays under
+ * the site root, but the inode can match a file outside the tree on the same filesystem. Optional
+ * `HOSTPANEL_SITE_FILES_BLOCK_HLINKS=true` rejects regular files with `nlink > 1` (may break intentional
+ * hardlinks, e.g. package managers inside the site tree).
+ *
+ * **Multipart `100 * 1024 * 1024`:** Configured on `@fastify/multipart` in `index.ts` for routes that parse multipart
+ * (e.g. media uploads). Site editor read/write uses JSON + `apps/api/src/modules/sites/routes.ts`, not that limit.
+ * There is no `file-manager.ts`; the HTTP API lives in `routes.ts` + this module.
+ */
 
 interface FileEntry {
   name: string;
@@ -7,6 +34,10 @@ interface FileEntry {
   type: "file" | "directory";
   size: number;
   modifiedAt: string;
+}
+
+function blockHardlinks(): boolean {
+  return process.env.HOSTPANEL_SITE_FILES_BLOCK_HLINKS === "true";
 }
 
 /** Sync path join + ".." guard — does not follow symlinks (see guardPathResolved). */
@@ -69,6 +100,21 @@ export async function guardPathResolved(rootPath: string, userPath: string): Pro
   }
 }
 
+async function assertHardlinkPolicyIfEnabled(absolutePath: string): Promise<void> {
+  if (!blockHardlinks()) return;
+  try {
+    const st = await lstat(absolutePath);
+    if (st.isFile() && st.nlink > 1) {
+      throw new Error("Hard-linked files are disabled (HOSTPANEL_SITE_FILES_BLOCK_HLINKS=true)");
+    }
+  } catch (e: unknown) {
+    if (e instanceof Error && e.message.includes("Hard-linked files")) throw e;
+    const code = typeof e === "object" && e && "code" in e ? (e as NodeJS.ErrnoException).code : "";
+    if (code === "ENOENT") return;
+    throw e;
+  }
+}
+
 export async function listDirectory(rootPath: string, userPath: string): Promise<FileEntry[]> {
   let rootReal: string;
   try {
@@ -107,6 +153,9 @@ export async function listDirectory(rootPath: string, userPath: string): Promise
     let modifiedAt = new Date().toISOString();
     try {
       const s = await stat(fullPath);
+      if (blockHardlinks() && s.isFile() && s.nlink > 1) {
+        continue;
+      }
       size = s.size;
       modifiedAt = s.mtime.toISOString();
     } catch {
@@ -130,17 +179,50 @@ export async function listDirectory(rootPath: string, userPath: string): Promise
 }
 
 export async function readFile(rootPath: string, userPath: string): Promise<string> {
-  const safePath = await guardPathResolved(rootPath, userPath);
+  const candidate = await guardPathResolved(rootPath, userPath);
+  const rootReal = await realpath(resolve(rootPath));
+
+  let verified: string;
   try {
-    return await fsReadFile(safePath, "utf-8");
+    verified = await realpath(candidate);
+  } catch {
+    return "";
+  }
+  if (verified !== rootReal && !verified.startsWith(rootReal + sep)) {
+    throw new Error("Path traversal detected");
+  }
+
+  await assertHardlinkPolicyIfEnabled(verified);
+
+  try {
+    return await fsReadFile(verified, "utf-8");
   } catch {
     return "";
   }
 }
 
 export async function writeFile(rootPath: string, userPath: string, content: string): Promise<void> {
-  const safePath = await guardPathResolved(rootPath, userPath);
-  const dir = dirname(safePath);
+  const candidate = await guardPathResolved(rootPath, userPath);
+  const rootReal = await realpath(resolve(rootPath));
+
+  try {
+    await access(candidate, fsConstants.F_OK);
+    const verified = await realpath(candidate);
+    if (verified !== rootReal && !verified.startsWith(rootReal + sep)) {
+      throw new Error("Path traversal detected");
+    }
+    await assertHardlinkPolicyIfEnabled(verified);
+  } catch (e: unknown) {
+    const code = typeof e === "object" && e && "code" in e ? (e as NodeJS.ErrnoException).code : "";
+    if (code === "ENOENT") {
+      /* new path — guardPathResolved already anchored parents */
+    } else {
+      throw e;
+    }
+  }
+
+  const dir = dirname(candidate);
   await mkdir(dir, { recursive: true });
-  await fsWriteFile(safePath, content, "utf-8");
+
+  await fsWriteFile(candidate, content, "utf-8");
 }
