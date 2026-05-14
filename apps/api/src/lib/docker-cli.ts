@@ -1,11 +1,12 @@
 import {
   execFile,
-  spawn,
-  spawnSync,
-  type ChildProcessWithoutNullStreams,
 } from "node:child_process";
 import { promisify } from "node:util";
+import pty from "node-pty";
+import type { IPty } from "node-pty";
 import type { DockerContainerRow, Role } from "@hostpanel/types";
+
+export type { IPty };
 
 const execFileAsync = promisify(execFile);
 
@@ -207,6 +208,213 @@ export async function dockerLogs(
   }
 }
 
+export type DockerPortBinding = {
+  /** Container port + protocol, e.g. "80/tcp" */
+  containerPort: string;
+  /** Host IP to bind on, default "0.0.0.0" */
+  hostIp: string;
+  /** Host port as string, e.g. "8080" */
+  hostPort: string;
+};
+
+export type DockerInspectResult = {
+  id: string;
+  name: string;
+  image: string;
+  cmd: string[];
+  env: string[];
+  binds: string[];
+  labels: Record<string, string>;
+  networkMode: string;
+  restartPolicy: string;
+  portBindings: DockerPortBinding[];
+  readonlyRootfs: boolean;
+  capDrop: string[];
+  securityOpt: string[];
+  tmpfs: Record<string, string>;
+  pidLimit: number;
+  isSidecar: boolean;
+};
+
+export async function dockerInspect(
+  containerRef: string,
+  refMode: DockerContainerRefMode
+): Promise<{ ok: true; data: DockerInspectResult } | { ok: false; error: string }> {
+  if (!isValidDockerContainerRef(containerRef, refMode)) {
+    return { ok: false, error: "Invalid container reference" };
+  }
+  try {
+    const { stdout } = await execFileAsync(
+      "docker",
+      ["inspect", "--format", "{{json .}}", containerRef],
+      { env: process.env, maxBuffer: 4 * 1024 * 1024, timeout: 15_000 }
+    );
+    const raw = JSON.parse(stdout.trim()) as Record<string, unknown>;
+    const hc = (raw.HostConfig ?? {}) as Record<string, unknown>;
+    const cfg = (raw.Config ?? {}) as Record<string, unknown>;
+
+    const name = String(raw.Name ?? "").replace(/^\//, "");
+    const image = String(cfg.Image ?? raw.Image ?? "");
+    const cmd = Array.isArray(cfg.Cmd) ? (cfg.Cmd as string[]) : [];
+    const env = Array.isArray(cfg.Env) ? (cfg.Env as string[]) : [];
+    const binds = Array.isArray(hc.Binds) ? (hc.Binds as string[]) : [];
+    const labels = (cfg.Labels ?? {}) as Record<string, string>;
+    const networkMode = String(hc.NetworkMode ?? "bridge");
+    const restartPolicyRaw = (hc.RestartPolicy ?? {}) as Record<string, unknown>;
+    const restartPolicy = String(restartPolicyRaw.Name ?? "no");
+    const readonlyRootfs = Boolean(hc.ReadonlyRootfs);
+    const capDrop = Array.isArray(hc.CapDrop) ? (hc.CapDrop as string[]) : [];
+    const securityOpt = Array.isArray(hc.SecurityOpt) ? (hc.SecurityOpt as string[]) : [];
+    const tmpfsRaw = (hc.Tmpfs ?? {}) as Record<string, string>;
+    const pidLimit = Number(hc.PidsLimit ?? 0);
+
+    // Parse PortBindings: { "80/tcp": [{ HostIp: "", HostPort: "8080" }], ... }
+    const pbRaw = (hc.PortBindings ?? {}) as Record<string, Array<{ HostIp?: string; HostPort?: string }>>;
+    const portBindings: DockerPortBinding[] = [];
+    for (const [cPort, bindings] of Object.entries(pbRaw)) {
+      for (const b of bindings ?? []) {
+        portBindings.push({
+          containerPort: cPort,
+          hostIp: b.HostIp || "0.0.0.0",
+          hostPort: b.HostPort || "",
+        });
+      }
+    }
+
+    return {
+      ok: true,
+      data: {
+        id: String(raw.Id ?? ""),
+        name,
+        image,
+        cmd,
+        env,
+        binds,
+        labels,
+        networkMode,
+        restartPolicy,
+        portBindings,
+        readonlyRootfs,
+        capDrop,
+        securityOpt,
+        tmpfs: tmpfsRaw,
+        pidLimit,
+        isSidecar: name.startsWith("hostpanel-site-"),
+      },
+    };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+const PORT_RE = /^\d{1,5}(\/(?:tcp|udp|sctp))?$/;
+const HOST_PORT_RE = /^\d{1,5}$/;
+const IP_RE = /^(\d{1,3}\.){3}\d{1,3}$/;
+
+export function validatePortBindings(bindings: unknown): { ok: true; bindings: DockerPortBinding[] } | { ok: false; error: string } {
+  if (!Array.isArray(bindings)) return { ok: false, error: "portBindings must be an array" };
+  const out: DockerPortBinding[] = [];
+  for (const b of bindings) {
+    const cp = String((b as Record<string, unknown>).containerPort ?? "").trim();
+    const hp = String((b as Record<string, unknown>).hostPort ?? "").trim();
+    const hi = String((b as Record<string, unknown>).hostIp ?? "0.0.0.0").trim();
+    const cpNorm = cp.includes("/") ? cp : `${cp}/tcp`;
+    if (!PORT_RE.test(cpNorm)) return { ok: false, error: `Invalid container port: "${cp}"` };
+    if (!HOST_PORT_RE.test(hp)) return { ok: false, error: `Invalid host port: "${hp}"` };
+    const cPortNum = parseInt(cpNorm.split("/")[0]!, 10);
+    const hPortNum = parseInt(hp, 10);
+    if (cPortNum < 1 || cPortNum > 65535) return { ok: false, error: `Container port out of range: ${cPortNum}` };
+    if (hPortNum < 1 || hPortNum > 65535) return { ok: false, error: `Host port out of range: ${hPortNum}` };
+    if (hi !== "0.0.0.0" && hi !== "" && hi !== "::" && !IP_RE.test(hi)) {
+      return { ok: false, error: `Invalid host IP: "${hi}"` };
+    }
+    out.push({ containerPort: cpNorm, hostIp: hi || "0.0.0.0", hostPort: hp });
+  }
+  return { ok: true, bindings: out };
+}
+
+/**
+ * Recreate a container with new port bindings.
+ * Stops, removes, then re-runs with the same image/cmd/env/volumes/labels
+ * plus the new port flags. Sidecar containers (hostpanel-site-*) are blocked.
+ */
+export async function dockerRecreateWithPorts(
+  containerRef: string,
+  refMode: DockerContainerRefMode,
+  newPorts: DockerPortBinding[]
+): Promise<{ ok: true; containerId: string } | { ok: false; error: string }> {
+  const inspectResult = await dockerInspect(containerRef, refMode);
+  if (!inspectResult.ok) return { ok: false, error: inspectResult.error };
+  const c = inspectResult.data;
+  if (c.isSidecar) {
+    return { ok: false, error: "Port management is not available for HostPanel site isolation containers (hostpanel-site-*). They use --network none and are file-system-only sidecars." };
+  }
+
+  // Stop + remove
+  try {
+    await execFileAsync("docker", ["stop", containerRef], { env: process.env, timeout: 30_000 }).catch(() => {});
+    await execFileAsync("docker", ["rm", containerRef], { env: process.env, timeout: 30_000 });
+  } catch (e) {
+    return { ok: false, error: `Failed to remove old container: ${e instanceof Error ? e.message : String(e)}` };
+  }
+
+  // Build docker run args
+  const args: string[] = ["run", "-d"];
+
+  args.push("--name", c.name);
+
+  // Restart policy
+  if (c.restartPolicy && c.restartPolicy !== "no") {
+    args.push("--restart", c.restartPolicy);
+  }
+
+  // Network
+  if (c.networkMode) args.push("--network", c.networkMode);
+
+  // Port bindings
+  for (const pb of newPorts) {
+    const bind = pb.hostIp && pb.hostIp !== "0.0.0.0"
+      ? `${pb.hostIp}:${pb.hostPort}:${pb.containerPort}`
+      : `${pb.hostPort}:${pb.containerPort}`;
+    args.push("-p", bind);
+  }
+
+  // Env
+  for (const e of c.env) args.push("-e", e);
+
+  // Volume binds
+  for (const b of c.binds) args.push("-v", b);
+
+  // Labels
+  for (const [k, v] of Object.entries(c.labels)) args.push("--label", `${k}=${v}`);
+
+  // Security opts
+  if (c.readonlyRootfs) args.push("--read-only");
+  for (const s of c.securityOpt) args.push("--security-opt", s);
+  for (const cap of c.capDrop) args.push("--cap-drop", cap);
+  if (c.pidLimit && c.pidLimit > 0) args.push("--pids-limit", String(c.pidLimit));
+
+  // Tmpfs
+  for (const [path, opts] of Object.entries(c.tmpfs)) {
+    args.push("--tmpfs", opts ? `${path}:${opts}` : path);
+  }
+
+  args.push(c.image);
+  for (const cmd of c.cmd) args.push(cmd);
+
+  try {
+    const { stdout } = await execFileAsync("docker", args, {
+      env: process.env,
+      maxBuffer: 1024 * 1024,
+      timeout: 120_000,
+    });
+    return { ok: true, containerId: stdout.trim() };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, error: `docker run failed: ${msg}` };
+  }
+}
+
 export async function dockerPing(): Promise<{ ok: true; version: string } | { ok: false; error: string }> {
   try {
     const { stdout } = await execFileAsync("docker", ["version", "--format", "{{.Server.Version}}"], {
@@ -223,18 +431,19 @@ export async function dockerPing(): Promise<{ ok: true; version: string } | { ok
 }
 
 /**
- * Interactive `docker exec` over piped stdio (Node → WebSocket).
- * `docker exec -it` requires a real TTY on the **host** side; `script(1)` provides one when available.
- * Set `HOSTPANEL_DOCKER_SHELL_USE_SCRIPT=false` to skip `script` and use `docker exec -i … /bin/sh -i` only.
+ * Spawn an interactive `docker exec` shell inside a container using node-pty.
+ * node-pty allocates a real PTY on the host, so resize via `pty.resize()` works
+ * without injecting stty commands into stdin.
  */
 export function spawnDockerInteractiveShell(
   containerRef: string,
-  workdir: string
-): ChildProcessWithoutNullStreams {
-  const env = { ...process.env, TERM: "xterm-256color" };
-  const tryScript = process.env.HOSTPANEL_DOCKER_SHELL_USE_SCRIPT !== "false";
+  workdir: string,
+  cols = 220,
+  rows = 50,
+): IPty {
+  const safeCols = Math.max(20, Math.min(cols, 512));
+  const safeRows = Math.max(5, Math.min(rows, 200));
 
-  // Validate inputs before any spawn — both are already validated upstream but double-check here
   if (!isValidDockerContainerRef(containerRef, "id-only") && !isValidDockerContainerRef(containerRef, "id-or-name")) {
     throw new Error(`Invalid container reference: ${containerRef}`);
   }
@@ -242,27 +451,44 @@ export function spawnDockerInteractiveShell(
     throw new Error(`Invalid workdir: ${workdir}`);
   }
 
-  if (tryScript && process.platform !== "win32") {
-    const probe = spawnSync("script", ["-qfc", "exit 0", "/dev/null"], {
-      env,
-      timeout: 5000,
-      stdio: "ignore",
-    });
-    if (!probe.error && probe.status === 0) {
-      // Pass each docker argument separately so script(1) exec's docker directly (no shell interpolation)
-      const dockerArgs = ["exec", "-i", "-t", "-w", workdir, containerRef, "/bin/sh"];
-      const inner = `docker ${dockerArgs.map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ")}`;
-      const sc = spawn("script", ["-qfc", inner, "/dev/null"], {
-        env,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-      return sc as ChildProcessWithoutNullStreams;
-    }
-  }
+  const env = Object.fromEntries(
+    Object.entries({ ...process.env, TERM: "xterm-256color", COLUMNS: String(safeCols), LINES: String(safeRows) })
+      .filter((e): e is [string, string] => e[1] !== undefined)
+  );
 
-  const child = spawn("docker", ["exec", "-i", "-w", workdir, containerRef, "/bin/sh", "-i"], {
+  return pty.spawn("docker", [
+    "exec", "-it",
+    "-e", `COLUMNS=${safeCols}`,
+    "-e", `LINES=${safeRows}`,
+    "-e", "TERM=xterm-256color",
+    "-w", workdir,
+    containerRef, "/bin/sh",
+  ], {
+    name: "xterm-256color",
+    cols: safeCols,
+    rows: safeRows,
+    cwd: process.cwd(),
     env,
-    stdio: ["pipe", "pipe", "pipe"],
   });
-  return child as ChildProcessWithoutNullStreams;
+}
+
+/**
+ * Parse a binary resize frame sent by the browser.
+ * Format: JSON `{"r":[cols,rows]}` sent as a binary WebSocket frame.
+ */
+export function parseResizeFrame(raw: Buffer | string): { cols: number; rows: number } | null {
+  try {
+    const text = Buffer.isBuffer(raw) ? raw.toString("utf8") : raw;
+    const msg = JSON.parse(text) as Record<string, unknown>;
+    if (!Array.isArray(msg.r) || msg.r.length < 2) return null;
+    const cols = Number(msg.r[0]);
+    const rows = Number(msg.r[1]);
+    if (!Number.isFinite(cols) || !Number.isFinite(rows)) return null;
+    return {
+      cols: Math.max(20, Math.min(cols, 512)),
+      rows: Math.max(5, Math.min(rows, 200)),
+    };
+  } catch {
+    return null;
+  }
 }

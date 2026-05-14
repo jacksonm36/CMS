@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { spawnSync } from "child_process";
 import { z } from "zod";
 import { prisma, type Prisma } from "@hostpanel/db";
 import type { Role } from "@hostpanel/types";
@@ -13,6 +14,10 @@ import {
 } from "./webservers/index.js";
 import { provisionSiteDir } from "./provisioner.js";
 import {
+  sanitizeDefaultDocument,
+  detectDefaultDocumentFromRoot,
+} from "./default-document.js";
+import {
   dbStackVersionEnum,
   nodeVersionEnum,
   patchSiteStackSchema,
@@ -20,8 +25,40 @@ import {
   pythonVersionEnum,
   stackCatalogResponse,
 } from "./runtime-catalog.js";
-import { ensureAlpineSidecar, getSidecarStatus, removeAlpineSidecar } from "./site-docker-isolation.js";
+import {
+  ensureAlpineSidecar,
+  getSidecarStatus,
+  removeAlpineSidecar,
+  sidecarContainerName,
+  alpinePackagesForStack,
+  provisionSidecarPackages,
+  portArgsForSite,
+  getDockerUsedPorts,
+  PORT_ALLOC_START,
+  PORT_ALLOC_END,
+} from "./site-docker-isolation.js";
 import { requireSiteIsolationDeploy, requireSiteReadForIsolation } from "../../lib/site-isolation-deploy.js";
+
+/** Allocate the first available port in the configured range. */
+async function allocatePort(): Promise<number | null> {
+  const rows = await prisma.site.findMany({
+    where: { appProxyPort: { not: null } },
+    select: { appProxyPort: true },
+  });
+  const used = new Set<number>([
+    ...rows.map((r) => r.appProxyPort as number),
+    ...getDockerUsedPorts(),
+  ]);
+  for (let p = PORT_ALLOC_START; p <= PORT_ALLOC_END; p++) {
+    if (!used.has(p)) return p;
+  }
+  return null;
+}
+
+/** True for site types that need an app port for the reverse proxy. */
+function typeNeedsPort(type: string): boolean {
+  return type === "nodejs" || type === "python" || type === "php";
+}
 
 const createSiteSchema = z
   .object({
@@ -33,9 +70,16 @@ const createSiteSchema = z
     nodeVersion: nodeVersionEnum.optional().nullable(),
     pythonVersion: pythonVersionEnum.optional().nullable(),
     dbStackVersion: dbStackVersionEnum.optional().nullable(),
+    /** Omit or null → auto-assigned from 10000–19999 for app types */
     appProxyPort: z.number().int().min(1024).max(65535).optional().nullable(),
+    /** Modular networking: containers in the same group can communicate */
+    networkGroup: z.string().max(80).regex(/^[a-z0-9][a-z0-9-]*$/).optional().nullable(),
+    /** Mark as central service (DB/cache) accessible to all group networks */
+    isCentralService: z.boolean().optional().default(false),
     /** Staff only — assign this site to a customer account */
     ownerId: z.string().cuid().optional(),
+    /** Homepage filename for static/PHP (e.g. main.html). Omit for normal index.html. */
+    defaultDocument: z.string().max(260).optional().nullable(),
   })
   .superRefine((data, ctx) => {
     if (data.webServer === "traefik" && (data.type === "php" || data.type === "static")) {
@@ -59,6 +103,15 @@ const createCronSchema = z.object({
   schedule: z.string().min(1),
   command: z.string().min(1),
 });
+
+const patchSiteSchema = z
+  .object({
+    name: z.string().min(1).max(100).optional(),
+    defaultDocument: z.union([z.string().max(260), z.literal(""), z.null()]).optional(),
+  })
+  .refine((d) => d.name !== undefined || d.defaultDocument !== undefined, {
+    message: "Provide at least one field to update",
+  });
 
 const fromTemplateSchema = z.object({
   templateId: z.string().min(1),
@@ -108,6 +161,18 @@ export async function sitesRoutes(app: FastifyInstance) {
       ownerId = assignee.id;
     }
 
+    // Auto-assign port if the template doesn't specify one
+    let appProxyPort = tpl.appProxyPort;
+    if (!appProxyPort && typeNeedsPort(tpl.type)) {
+      const allocated = await allocatePort();
+      if (!allocated) return reply.status(503).send({ success: false, error: `Port range ${PORT_ALLOC_START}–${PORT_ALLOC_END} exhausted` });
+      appProxyPort = allocated;
+    }
+
+    let inheritedDoc: string | null = tpl.defaultDocument ?? null;
+    if (inheritedDoc) inheritedDoc = sanitizeDefaultDocument(inheritedDoc);
+    if (inheritedDoc != null && tpl.type !== "static" && tpl.type !== "php") inheritedDoc = null;
+
     const rootPath = `/var/www/${body.data.domain}`;
     const site = await prisma.site.create({
       data: {
@@ -120,8 +185,11 @@ export async function sitesRoutes(app: FastifyInstance) {
         nodeVersion: tpl.nodeVersion,
         pythonVersion: tpl.pythonVersion,
         dbStackVersion: tpl.dbStackVersion,
-        appProxyPort: tpl.appProxyPort,
+        appProxyPort,
+        networkGroup: tpl.networkGroup ?? null,
+        isCentralService: tpl.isCentralService ?? false,
         templateId: tpl.id,
+        defaultDocument: inheritedDoc,
         rootPath,
         status: "pending",
       },
@@ -137,15 +205,53 @@ export async function sitesRoutes(app: FastifyInstance) {
     return reply.status(201).send({ success: true, data: site });
   });
 
+  // GET /api/sites/network-groups — list distinct group names for UI dropdowns
+  app.get("/network-groups", { preHandler: requireRole("superadmin", "admin") }, async (_req, reply) => {
+    const rows = await prisma.site.findMany({
+      where: { networkGroup: { not: null } },
+      select: { networkGroup: true },
+      distinct: ["networkGroup"],
+      orderBy: { networkGroup: "asc" },
+    });
+    return reply.send({ success: true, data: rows.map((r) => r.networkGroup as string) });
+  });
+
   // POST /api/sites
   app.post("/", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
     const body = createSiteSchema.safeParse(request.body);
     if (!body.success) return reply.status(400).send({ success: false, error: body.error.message });
 
-    const { name, domain, type, webServer, phpVersion, nodeVersion, pythonVersion, dbStackVersion, appProxyPort, ownerId: assignOwnerId } =
-      body.data;
+    const {
+      name, domain, type, webServer, phpVersion, nodeVersion, pythonVersion,
+      dbStackVersion, networkGroup, isCentralService, ownerId: assignOwnerId,
+    } = body.data;
+    let { appProxyPort } = body.data;
+
+    let defaultDocument: string | null = body.data.defaultDocument ?? null;
+    if (defaultDocument === "") defaultDocument = null;
+    else if (defaultDocument != null) {
+      const s = sanitizeDefaultDocument(defaultDocument);
+      if (!s) {
+        return reply.status(400).send({ success: false, error: "Invalid defaultDocument filename" });
+      }
+      defaultDocument = s;
+    }
+    if (defaultDocument != null && type !== "static" && type !== "php") {
+      return reply.status(400).send({
+        success: false,
+        error: "Homepage file applies only to static or PHP sites.",
+      });
+    }
+
     const existing = await prisma.site.findUnique({ where: { domain } });
     if (existing) return reply.status(409).send({ success: false, error: "Domain already exists" });
+
+    // Auto-assign a conflict-free port for app types
+    if (!appProxyPort && typeNeedsPort(type)) {
+      const allocated = await allocatePort();
+      if (!allocated) return reply.status(503).send({ success: false, error: `Port range ${PORT_ALLOC_START}–${PORT_ALLOC_END} exhausted` });
+      appProxyPort = allocated;
+    }
 
     const role = request.user.role as Role;
     let ownerId = request.user.sub as string;
@@ -171,6 +277,9 @@ export async function sitesRoutes(app: FastifyInstance) {
         pythonVersion: pythonVersion ?? null,
         dbStackVersion: dbStackVersion ?? null,
         appProxyPort: appProxyPort ?? null,
+        networkGroup: networkGroup ?? null,
+        isCentralService: isCentralService ?? false,
+        defaultDocument,
         rootPath,
         status: "pending",
       },
@@ -193,10 +302,31 @@ export async function sitesRoutes(app: FastifyInstance) {
     const site = await prisma.site.findUnique({ where: { id } });
     if (!site) return reply.status(404).send({ success: false, error: "Site not found" });
 
-    const result = ensureAlpineSidecar(id, site.rootPath);
+    const stack = {
+      type: site.type,
+      appProxyPort: site.appProxyPort,
+      dbStackVersion: site.dbStackVersion,
+      phpVersion: site.phpVersion,
+      nodeVersion: site.nodeVersion,
+      pythonVersion: site.pythonVersion,
+      networkGroup: site.networkGroup,
+      isCentralService: site.isCentralService,
+    };
+
+    const result = ensureAlpineSidecar(id, site.rootPath, stack);
     if (!result.ok) {
       return reply.status(503).send({ success: false, error: result.error });
     }
+
+    // On fresh creation: install stack tools in the background.
+    if (result.provisioned) {
+      provisionSidecarPackages(sidecarContainerName(id), alpinePackagesForStack(stack));
+    }
+
+    // Expose which ports are published so the UI / nginx config can use them
+    const publishedPorts = portArgsForSite(stack)
+      .filter((a) => !a.startsWith("-"))
+      .map((p) => p.replace(/^127\.0\.0\.1:/, ""));
 
     const updated = await prisma.site.update({
       where: { id },
@@ -207,7 +337,11 @@ export async function sitesRoutes(app: FastifyInstance) {
       success: true,
       data: {
         site: updated,
-        hint: "Set HOSTPANEL_TERMINAL_DOCKER=true on the API host so the site terminal uses docker exec into this container.",
+        provisioning: result.provisioned,
+        publishedPorts,
+        hint: result.provisioned
+          ? `Stack packages are being installed in the background (~60 s). Published ports: ${publishedPorts.join(", ") || "none (static site)"}.`
+          : "Container already existed — no reinstall. Delete and redeploy to reprovision with updated ports.",
       },
     });
   });
@@ -254,15 +388,44 @@ export async function sitesRoutes(app: FastifyInstance) {
     const site = await prisma.site.findUnique({ where: { id } });
     if (!site) return reply.status(404).send({ success: false, error: "Site not found" });
 
-    const rm = removeAlpineSidecar(id);
-    if (!rm.ok) {
-      return reply.status(503).send({ success: false, error: rm.error });
+    removeAlpineSidecar(id, site.dockerContainerId);
+
+    // Source of truth for "Tenant" badge: canonical name must really exist in Docker.
+    // If the container was removed manually, inspect fails with "no such object" — still clear the DB.
+    const name = sidecarContainerName(id);
+    const ins = spawnSync("docker", ["inspect", "-f", "{{.State.Status}}", name], { encoding: "utf8", timeout: 120_000 });
+    const errText = `${ins.stderr ?? ""}${ins.stdout ?? ""}`.toLowerCase();
+    const dockerUnreachable =
+      errText.includes("permission denied") ||
+      errText.includes("cannot connect to the docker daemon") ||
+      errText.includes("error during connect") ||
+      errText.includes("connect: connection refused");
+
+    if (ins.status !== 0 && dockerUnreachable) {
+      return reply.status(503).send({
+        success: false,
+        error: "HostPanel cannot talk to the Docker daemon — fix API user access to Docker, then retry clearing the tenant.",
+      });
     }
+
+    const stillThere = ins.status === 0 && Boolean((ins.stdout || "").trim());
+
+    if (stillThere) {
+      return reply.status(503).send({
+        success: false,
+        error: `Docker still has a container named ${name}. Stop or remove it manually, then click "Remove tenant container" again.`,
+      });
+    }
+
     const updated = await prisma.site.update({
       where: { id },
       data: { dockerContainerId: null },
     });
-    return reply.send({ success: true, data: { site: updated } });
+    return reply.send({
+      success: true,
+      data: { site: updated },
+      message: "Tenant isolation cleared — the sidecar is gone and the panel record is updated.",
+    });
   });
 
   // GET /api/sites/:id
@@ -278,6 +441,87 @@ export async function sitesRoutes(app: FastifyInstance) {
       return reply.status(403).send({ success: false, error: "Forbidden" });
     }
     return reply.send({ success: true, data: site });
+  });
+
+  // PATCH /api/sites/:id — name / homepage file (staff)
+  app.patch("/:id", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const parsed = patchSiteSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ success: false, error: parsed.error.message });
+    }
+
+    const site = await prisma.site.findUnique({ where: { id } });
+    if (!site) return reply.status(404).send({ success: false, error: "Site not found" });
+
+    const data: Prisma.SiteUpdateInput = {};
+    if (parsed.data.name !== undefined) data.name = parsed.data.name;
+
+    let needsReload = false;
+    if (parsed.data.defaultDocument !== undefined) {
+      if (site.type !== "static" && site.type !== "php") {
+        return reply.status(400).send({
+          success: false,
+          error: "Homepage file applies only to static or PHP sites.",
+        });
+      }
+      let doc: string | null =
+        parsed.data.defaultDocument === "" || parsed.data.defaultDocument === null
+          ? null
+          : sanitizeDefaultDocument(parsed.data.defaultDocument as string);
+      if (parsed.data.defaultDocument !== "" && parsed.data.defaultDocument !== null && doc === null) {
+        return reply.status(400).send({ success: false, error: "Invalid defaultDocument filename" });
+      }
+      data.defaultDocument = doc;
+      needsReload = true;
+    }
+
+    const updated = await prisma.site.update({ where: { id }, data });
+
+    if (needsReload) {
+      writeSiteConfig(updated)
+        .then((configPath) => prisma.site.update({ where: { id }, data: { webConfigPath: configPath } }))
+        .then(() => reloadWebServer(updated.webServer as WebServerType))
+        .catch(console.error);
+    }
+
+    return reply.send({ success: true, data: updated });
+  });
+
+  // POST /api/sites/:id/homepage/detect — infer homepage from disk (staff)
+  app.post("/:id/homepage/detect", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const site = await prisma.site.findUnique({ where: { id } });
+    if (!site) return reply.status(404).send({ success: false, error: "Site not found" });
+    if (site.type !== "static" && site.type !== "php") {
+      return reply.status(400).send({
+        success: false,
+        error: "Homepage detection applies only to static or PHP sites.",
+      });
+    }
+
+    const detected = await detectDefaultDocumentFromRoot(site.rootPath);
+    const updated = await prisma.site.update({
+      where: { id },
+      data: { defaultDocument: detected },
+    });
+
+    writeSiteConfig(updated)
+      .then((configPath) => prisma.site.update({ where: { id }, data: { webConfigPath: configPath } }))
+      .then(() => reloadWebServer(updated.webServer as WebServerType))
+      .catch(console.error);
+
+    return reply.send({
+      success: true,
+      data: {
+        site: updated,
+        detected,
+        hint:
+          detected === null
+            ? "No change: either index.html/index.htm exists, there are multiple HTML files, or the directory could not be read."
+            : undefined,
+      },
+    });
   });
 
   // PATCH /api/sites/:id/stack — PHP / Node / Python / DB stack labels + app proxy port
@@ -325,7 +569,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     const site = await prisma.site.findUnique({ where: { id } });
     if (!site) return reply.status(404).send({ success: false, error: "Site not found" });
 
-    removeAlpineSidecar(id);
+    removeAlpineSidecar(id, site.dockerContainerId);
 
     await prisma.site.delete({ where: { id } });
     removeSiteConfig(site).then(() => reloadWebServer(site.webServer as WebServerType)).catch(console.error);
@@ -424,7 +668,22 @@ export async function sitesRoutes(app: FastifyInstance) {
       return reply.status(403).send({ success: false, error: "Forbidden" });
     }
 
-    await writeFile(site.rootPath, body.data.path, body.data.content);
+    try {
+      await writeFile(site.rootPath, body.data.path, body.data.content);
+    } catch (e: unknown) {
+      const err = e as NodeJS.ErrnoException;
+      if (err.code === "EACCES" || err.code === "EPERM") {
+        request.log.warn({ rootPath: site.rootPath, path: body.data.path, code: err.code }, "site files/write denied");
+        return reply.status(403).send({
+          success: false,
+          error:
+            `Cannot write files under ${site.rootPath}: permission denied for the HostPanel API user. On the server run:\n` +
+            `sudo chown -R hostpanel:hostpanel ${site.rootPath}\n` +
+            `sudo chmod -R u+rwX,g+rX,o+rX ${site.rootPath}`,
+        });
+      }
+      throw e;
+    }
     return reply.send({ success: true, message: "File saved" });
   });
 

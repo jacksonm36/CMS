@@ -1,4 +1,5 @@
 import type { Site } from "@hostpanel/db";
+import { indexFilenamesForSite } from "../default-document.js";
 import { appUpstreamPort } from "./proxy-port.js";
 
 export const APACHE_SITES_DIR = process.env.APACHE_SITES_DIR ?? "/etc/apache2/sites-enabled";
@@ -7,6 +8,7 @@ export const APACHE_LOG_DIR = process.env.APACHE_LOG_DIR ?? "/var/log/apache2";
 export function generateConfig(site: Site): string {
   const phpVersion = site.phpVersion ?? "8.2";
   const upstream = appUpstreamPort(site);
+  const dirIndex = indexFilenamesForSite(site).join(" ");
 
   // PHP via mod_php or FPM proxy
   const phpFpmBlock = site.type === "php" ? `
@@ -30,6 +32,7 @@ export function generateConfig(site: Site): string {
     DocumentRoot ${site.rootPath}
 
     <Directory ${site.rootPath}>
+        DirectoryIndex ${dirIndex}
         Options -Indexes +FollowSymLinks
         AllowOverride All
         Require all granted

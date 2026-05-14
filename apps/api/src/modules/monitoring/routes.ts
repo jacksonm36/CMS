@@ -40,7 +40,7 @@ export async function monitoringRoutes(app: FastifyInstance) {
 
   // WebSocket stream — cookie / Sec-WebSocket-Protocol (`hp.jwt.*`) / deprecated ?token=
   app.get("/metrics/stream", { websocket: true }, async (socket, req) => {
-    const payload = await verifyWsJwt(app, req);
+    const payload = await verifyWsJwt(app, req, { allowQueryToken: false });
     if (!payload || (payload.role !== "superadmin" && payload.role !== "admin")) {
       socket.close();
       return;

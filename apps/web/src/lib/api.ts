@@ -29,13 +29,20 @@ class ApiClient {
     options: { body?: unknown; token?: string | null } = {}
   ): Promise<T> {
     const token = options.token !== undefined ? options.token : this.getToken();
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const headers: Record<string, string> = {};
     if (token) headers.Authorization = `Bearer ${token}`;
+    // Do not send Content-Type: application/json without a body — Fastify rejects
+    // empty JSON bodies with 400 (breaks DELETE /api/sites/:id/isolation, etc.).
+    const bodyJson =
+      options.body !== undefined ? JSON.stringify(options.body) : undefined;
+    if (bodyJson !== undefined) {
+      headers["Content-Type"] = "application/json";
+    }
 
     const res = await fetch(`${this.baseUrl}/api${path}`, {
       method,
       headers,
-      body: options.body ? JSON.stringify(options.body) : undefined,
+      body: bodyJson,
       credentials: typeof window !== "undefined" ? "include" : undefined,
     });
 
@@ -47,9 +54,24 @@ class ApiClient {
       throw new Error("Unauthorized");
     }
 
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
-    return data;
+    const raw = await res.text();
+    let parsed: Record<string, unknown> | undefined;
+    try {
+      parsed = raw.trim() ? (JSON.parse(raw) as Record<string, unknown>) : {};
+    } catch {
+      parsed = undefined;
+    }
+
+    if (!res.ok) {
+      const msg =
+        (parsed && typeof parsed.error === "string" && parsed.error) ||
+        (parsed && typeof parsed.message === "string" && parsed.message) ||
+        (res.statusText ? `${res.statusText} (${res.status})`.trim() : `HTTP ${res.status}`);
+      throw new Error(msg);
+    }
+
+    if (parsed === undefined) throw new Error("Invalid JSON response from API");
+    return parsed as T;
   }
 
   get<T>(path: string, tokenOverride?: string | null) {

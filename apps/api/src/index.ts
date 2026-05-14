@@ -6,7 +6,7 @@ import rateLimit from "@fastify/rate-limit";
 import multipart from "@fastify/multipart";
 import websocket from "@fastify/websocket";
 import staticFiles from "@fastify/static";
-import { isAbsolute, join, resolve } from "path";
+import { isAbsolute, resolve } from "path";
 
 import { authRoutes } from "./modules/auth/routes.js";
 import { passkeyRoutes } from "./modules/auth/passkey.js";
@@ -29,7 +29,9 @@ import { auditMiddleware } from "./middleware/audit.js";
 import { startMonitoringWorker } from "./modules/monitoring/worker.js";
 import { startCronWorker } from "./modules/sites/cron-worker.js";
 import { assertProductionSecrets, corsOriginConfig } from "./lib/security-env.js";
+import { runMigrateDeployIfEnabled } from "./lib/prisma-migrate-on-start.js";
 
+await runMigrateDeployIfEnabled();
 assertProductionSecrets();
 
 const app = Fastify({

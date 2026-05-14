@@ -1,4 +1,5 @@
 import type { Site } from "@hostpanel/db";
+import { sanitizeDefaultDocument } from "../default-document.js";
 import { appUpstreamPort } from "./proxy-port.js";
 
 export const CADDY_CONF_D = process.env.CADDY_CONF_D ?? "/etc/caddy/conf.d";
@@ -18,6 +19,16 @@ export function generateConfig(site: Site): string {
     header X-Content-Type-Options "nosniff"
     header Referrer-Policy "strict-origin-when-cross-origin"`;
 
+  const customHome = sanitizeDefaultDocument(site.defaultDocument);
+  const rootRewrite =
+    customHome && (site.type === "static" || site.type === "php")
+      ? `
+    @hpSiteRoot path /
+    handle @hpSiteRoot {
+        rewrite * /${escapeCaddy(customHome)}
+    }`
+      : "";
+
   if (site.type === "nodejs" || site.type === "python") {
     return `# HostPanel — managed by hostpanel (caddy)
 ${dom}, www.${dom} {
@@ -35,6 +46,7 @@ ${dom}, www.${dom} {
     root * ${root}
     encode gzip zstd
 ${secHeaders}
+${rootRewrite}
     php_fastcgi unix//${sockPath} {
         root ${root}
     }
@@ -49,6 +61,7 @@ ${dom}, www.${dom} {
     root * ${root}
     encode gzip zstd
 ${secHeaders}
+${rootRewrite}
     file_server
 }
 `;

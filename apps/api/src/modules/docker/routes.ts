@@ -1,22 +1,26 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
-import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { z } from "zod";
 import type { DockerContainerRow, Role } from "@hostpanel/types";
 import { requireDockerPanel, requireRole } from "../../lib/auth.js";
 import {
   dockerContainerRunningState,
   dockerExecShellWorkdir,
+  dockerInspect,
   dockerLifecycle,
   dockerLogs,
   dockerPing,
   dockerPsJson,
+  dockerRecreateWithPorts,
   dockerRefModeForRole,
   dockerRefVisibleInDaemonListing,
   dockerRemove,
   enrichDockerContainerRow,
   isValidDockerContainerRef,
+  parseResizeFrame,
   sanitizeDockerExecWorkdir,
   spawnDockerInteractiveShell,
+  validatePortBindings,
+  type IPty,
 } from "../../lib/docker-cli.js";
 import { prisma } from "@hostpanel/db";
 import { verifyWsJwt } from "../../lib/ws-auth.js";
@@ -91,6 +95,48 @@ export async function dockerRoutes(app: FastifyInstance) {
         return reply.status(400).send({ success: false, error: result.error });
       }
       return reply.send({ success: true, data: { logs: result.logs } });
+    }
+  );
+
+  app.get(
+    "/containers/:id/inspect",
+    { preHandler: requireDockerPanel() },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const ref = decodeURIComponent(id);
+      const { role } = request.user as { role: Role };
+      const refMode = dockerRefModeForRole(role);
+      if (!isValidDockerContainerRef(ref, refMode)) {
+        return reply.status(400).send({ success: false, error: "Invalid container reference" });
+      }
+      if (!(await assertDockerTargetListed(ref, reply))) return;
+      const result = await dockerInspect(ref, refMode);
+      if (!result.ok) return reply.status(400).send({ success: false, error: result.error });
+      return reply.send({ success: true, data: result.data });
+    }
+  );
+
+  app.post(
+    "/containers/:id/ports",
+    { preHandler: requireRole("superadmin", "admin") },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const ref = decodeURIComponent(id);
+      const { role } = request.user as { role: Role };
+      const refMode = dockerRefModeForRole(role);
+      if (!isValidDockerContainerRef(ref, refMode)) {
+        return reply.status(400).send({ success: false, error: "Invalid container reference" });
+      }
+      if (!(await assertDockerTargetListed(ref, reply))) return;
+      const body = z.object({ portBindings: z.array(z.unknown()) }).safeParse(request.body);
+      if (!body.success) {
+        return reply.status(400).send({ success: false, error: "Expected { portBindings: [...] }" });
+      }
+      const validated = validatePortBindings(body.data.portBindings);
+      if (!validated.ok) return reply.status(400).send({ success: false, error: validated.error });
+      const result = await dockerRecreateWithPorts(ref, refMode, validated.bindings);
+      if (!result.ok) return reply.status(400).send({ success: false, error: result.error });
+      return reply.send({ success: true, data: { containerId: result.containerId }, message: "Container recreated with new port bindings" });
     }
   );
 
@@ -176,6 +222,9 @@ export async function dockerRoutes(app: FastifyInstance) {
   app.get("/containers/:ref/terminal", { websocket: true }, async (socket, request) => {
     const refRaw = (request.params as { ref: string }).ref;
     const ref = decodeURIComponent(refRaw);
+    const qs = request.query as Record<string, string | string[] | undefined>;
+    const initCols = Math.max(20, Math.min(parseInt(String(qs.cols ?? "220"), 10) || 220, 512));
+    const initRows = Math.max(5, Math.min(parseInt(String(qs.rows ?? "50"), 10) || 50, 200));
 
     const payload = await verifyWsJwt(app, request, { allowQueryToken: false });
     if (!payload) {
@@ -242,10 +291,11 @@ export async function dockerRoutes(app: FastifyInstance) {
     }
 
     const workdir = sanitizeDockerExecWorkdir(await dockerExecShellWorkdir(ref), "/");
-    let shell: ChildProcessWithoutNullStreams | null = null;
+    let shell: IPty | null = null;
+    let shellDead = false;
 
     try {
-      shell = spawnDockerInteractiveShell(ref, workdir);
+      shell = spawnDockerInteractiveShell(ref, workdir, initCols, initRows);
 
       try {
         socket.send("\r\n\x1b[32m✓ Connected\x1b[0m\r\n");
@@ -253,28 +303,30 @@ export async function dockerRoutes(app: FastifyInstance) {
         /* ignore */
       }
 
-      shell.on("error", (err) => {
-        try {
-          const msg = err instanceof Error ? err.message : String(err);
-          socket.send(`\r\n\x1b[31mShell process error: ${msg}\x1b[0m\r\n`);
-        } catch {
-          /* ignore */
+      shell.onData((data: string) => {
+        try { socket.send(data); } catch { /* ignore */ }
+      });
+
+      shell.onExit(() => {
+        shellDead = true;
+        try { socket.send("\r\n\x1b[33mShell exited\x1b[0m\r\n"); } catch { /* ignore */ }
+        socket.close();
+      });
+
+      socket.on("message", (raw: unknown) => {
+        if (!shell || shellDead) return;
+        // ws delivers ALL frames (including text) as Buffer; check for resize
+        // first, then fall through to writing keyboard input.
+        if (Buffer.isBuffer(raw)) {
+          const resize = parseResizeFrame(raw);
+          if (resize) {
+            try { shell.resize(resize.cols, resize.rows); } catch { /* ignore */ }
+            return;
+          }
+          shell.write(raw.toString("utf8"));
+          return;
         }
-        socket.close();
-      });
-
-      shell.stdout.on("data", (data: Buffer) => socket.send(data.toString("utf-8")));
-      shell.stderr.on("data", (data: Buffer) => socket.send(data.toString("utf-8")));
-
-      shell.on("exit", () => {
-        socket.send("\r\n\x1b[33mShell exited\x1b[0m\r\n");
-        socket.close();
-      });
-
-      socket.on("message", (raw: Buffer | string) => {
-        if (!shell || shell.killed) return;
-        const chunk = typeof raw === "string" ? raw : raw.toString("utf8");
-        shell.stdin.write(chunk);
+        shell.write(typeof raw === "string" ? raw : String(raw));
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -284,7 +336,10 @@ export async function dockerRoutes(app: FastifyInstance) {
     }
 
     socket.on("close", () => {
-      if (shell && !shell.killed) shell.kill();
+      if (shell && !shellDead) {
+        shellDead = true;
+        try { shell.kill(); } catch { /* ignore */ }
+      }
     });
   });
 }

@@ -19,6 +19,7 @@ export function TerminalPane({ siteId, height }: TerminalPaneProps) {
     if (!terminalRef.current) return;
 
     let destroyed = false;
+    let cleanupResizeObserver: (() => void) | undefined;
 
     async function initTerminal() {
       const { Terminal } = await import("xterm");
@@ -64,65 +65,68 @@ export function TerminalPane({ siteId, height }: TerminalPaneProps) {
 
       term.open(terminalRef.current);
       fitAddon.fit();
-
       xtermRef.current = { term, fitAddon };
+      requestAnimationFrame(() => { if (!destroyed) term.focus(); });
 
-      // WebSocket hits the API directly (Next rewrites do not upgrade WS)
       const wsUrl = getBrowserApiWebSocketBase();
-
       const token = localStorage.getItem("hp_token");
+      const sizeQuery = `?cols=${term.cols}&rows=${term.rows}`;
+      const wsProto = token ? jwtToWebSocketProtocol(token) : "";
+      const ws = token
+        ? new WebSocket(`${wsUrl}/api/sites/${siteId}/terminal${sizeQuery}`, [wsProto])
+        : new WebSocket(`${wsUrl}/api/sites/${siteId}/terminal${sizeQuery}`);
+      ws.binaryType = "arraybuffer";
+      wsRef.current = ws;
 
-      try {
-        const wsProto = token ? jwtToWebSocketProtocol(token) : "";
-        const ws = token
-          ? new WebSocket(`${wsUrl}/api/sites/${siteId}/terminal`, [wsProto])
-          : new WebSocket(`${wsUrl}/api/sites/${siteId}/terminal`);
-        wsRef.current = ws;
+      const writeWsData = (data: unknown) => {
+        if (typeof data === "string") { term.write(data); return; }
+        if (data instanceof ArrayBuffer) {
+          term.write(new TextDecoder("utf-8", { fatal: false }).decode(data));
+          return;
+        }
+        if (typeof Blob !== "undefined" && data instanceof Blob) {
+          void data.arrayBuffer().then((buf) => term.write(new TextDecoder("utf-8", { fatal: false }).decode(buf)));
+          return;
+        }
+        term.write(String(data));
+      };
 
-        ws.onopen = () => term.writeln("\r\n\x1b[32m✓ Connected to shell\x1b[0m\r\n");
-        ws.onmessage = (e) => term.write(e.data);
-        ws.onclose = () => term.writeln("\r\n\x1b[31m✗ Connection closed\x1b[0m");
-        ws.onerror = () => term.writeln("\r\n\x1b[33m⚠ WebSocket unavailable (demo mode)\x1b[0m");
+      const sendResize = (cols: number, rows: number) => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(new TextEncoder().encode(JSON.stringify({ r: [cols, rows] })));
+        }
+      };
 
-        term.onData((data) => {
-          if (ws.readyState === WebSocket.OPEN) ws.send(data);
-        });
+      const pendingStdin: string[] = [];
+      term.onData((data) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(data);
+        else pendingStdin.push(data);
+      });
+      term.onResize(({ cols, rows }) => sendResize(cols, rows));
 
-        term.writeln("\x1b[36mHostPanel Terminal\x1b[0m — Type commands below");
-      } catch {
-        term.writeln("\x1b[33m⚠ Terminal requires a live server connection\x1b[0m");
-        // Provide a simulated shell for demo
-        term.write("$ ");
-        let cmd = "";
-        term.onData((data) => {
-          if (data === "\r") {
-            term.writeln("");
-            if (cmd.trim() === "ls") term.writeln("index.html  style.css  app.js");
-            else if (cmd.trim() === "pwd") term.writeln("/var/www/site");
-            else if (cmd.trim() === "whoami") term.writeln("www-data");
-            else if (cmd.trim() === "clear") term.clear();
-            else if (cmd.trim()) term.writeln(`bash: ${cmd}: command not found`);
-            cmd = "";
-            term.write("$ ");
-          } else if (data === "\x7f") {
-            if (cmd.length > 0) { cmd = cmd.slice(0, -1); term.write("\b \b"); }
-          } else {
-            cmd += data;
-            term.write(data);
-          }
-        });
-      }
+      ws.onopen = () => {
+        for (const chunk of pendingStdin) ws.send(chunk);
+        pendingStdin.length = 0;
+        if (term.cols !== parseInt(new URL(ws.url).searchParams.get("cols") ?? "0") ||
+            term.rows !== parseInt(new URL(ws.url).searchParams.get("rows") ?? "0")) {
+          sendResize(term.cols, term.rows);
+        }
+        term.focus();
+      };
+      ws.onmessage = (e) => writeWsData(e.data);
+      ws.onclose = () => term.writeln("\r\n\x1b[31m✗ Connection closed\x1b[0m");
+      ws.onerror = () => term.writeln("\r\n\x1b[33m⚠ WebSocket error\x1b[0m");
 
       const resizeObserver = new ResizeObserver(() => fitAddon.fit());
       resizeObserver.observe(terminalRef.current);
-
-      return () => resizeObserver.disconnect();
+      cleanupResizeObserver = () => resizeObserver.disconnect();
     }
 
     initTerminal().catch(console.error);
 
     return () => {
       destroyed = true;
+      cleanupResizeObserver?.();
       wsRef.current?.close();
       if (xtermRef.current) (xtermRef.current as { term: { dispose: () => void } }).term.dispose();
     };
@@ -144,7 +148,11 @@ export function TerminalPane({ siteId, height }: TerminalPaneProps) {
           <div className="w-3 h-3 rounded-full bg-emerald-400/80" />
         </div>
       </div>
-      <div ref={terminalRef} className="flex-1 p-2" />
+      <div
+        ref={terminalRef}
+        className="flex-1 p-2 cursor-text"
+        onClick={() => (xtermRef.current as { term: { focus: () => void } } | null)?.term.focus()}
+      />
     </div>
   );
 }

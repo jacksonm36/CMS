@@ -1,4 +1,5 @@
 import type { Site } from "@hostpanel/db";
+import { indexFilenamesForSite, nginxExactRootTryFiles } from "../default-document.js";
 import { appUpstreamPort } from "./proxy-port.js";
 
 export const NGINX_SITES_DIR = process.env.NGINX_SITES_DIR ?? "/etc/nginx/sites-enabled";
@@ -7,6 +8,15 @@ export const NGINX_LOG_DIR = process.env.NGINX_LOG_DIR ?? "/var/log/nginx";
 export function generateConfig(site: Site): string {
   const phpSocket = `/run/php/php${site.phpVersion ?? "8.2"}-fpm.sock`;
   const upstream = appUpstreamPort(site);
+  const indexDirective = indexFilenamesForSite(site).join(" ");
+
+  const rootExactBlock =
+    site.type === "static" || site.type === "php"
+      ? `
+    location = / {
+        try_files ${nginxExactRootTryFiles(site)} =404;
+    }`
+      : "";
 
   const phpBlock = site.type === "php" ? `
     location ~ \\.php$ {
@@ -30,7 +40,7 @@ export function generateConfig(site: Site): string {
 
   const staticBlock = (site.type === "static" || site.type === "php") ? `
     location / {
-        try_files $uri $uri/ =404;
+        try_files $uri/index.html $uri $uri/ =404;
     }` : "";
 
   return `# HostPanel — managed by hostpanel (nginx)
@@ -39,7 +49,7 @@ server {
     listen [::]:80;
     server_name ${site.domain} www.${site.domain};
     root ${site.rootPath};
-    index index.html index.htm index.php;
+    index ${indexDirective};
 
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
@@ -50,12 +60,13 @@ server {
     gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
 
     location ~ /\\. { deny all; }
+    ${rootExactBlock}
     ${phpBlock}
     ${proxyBlock}
     ${site.type === "nodejs" || site.type === "python" ? "" : staticBlock}
 
     access_log ${NGINX_LOG_DIR}/${site.domain}.access.log;
-    error_log  ${NGINX_LOG_DIR}/${site.domain}.error.log;
+    error_log ${NGINX_LOG_DIR}/${site.domain}.error.log;
 }
 `;
 }

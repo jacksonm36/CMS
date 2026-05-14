@@ -58,6 +58,28 @@ case "$OS_ID_RAW" in
   *) DOCKER_APT_DISTRO="debian" ;;
 esac
 
+# Docker CE apt repo may lag behind the latest distro release. Map unsupported
+# codenames to the latest known-good one so packages are always installable.
+# For Debian: trixie/forky/sid → bookworm (CE bookworm packages work on Debian 13+)
+# For Ubuntu: anything after noble → noble
+resolve_docker_ce_codename() {
+  local distro="$1" codename="$2"
+  if [[ "$distro" == "debian" ]]; then
+    case "$codename" in
+      buster|bullseye|bookworm) echo "$codename" ;;
+      *) echo "bookworm" ;;
+    esac
+  elif [[ "$distro" == "ubuntu" ]]; then
+    case "$codename" in
+      focal|jammy|mantic|noble) echo "$codename" ;;
+      *) echo "noble" ;;
+    esac
+  else
+    echo "$codename"
+  fi
+}
+DOCKER_CE_CODENAME="$(resolve_docker_ce_codename "$DOCKER_APT_DISTRO" "$OS_CODENAME")"
+
 export DEBIAN_FRONTEND=noninteractive
 
 virt_environment_hint() {
@@ -73,10 +95,11 @@ virt_environment_hint() {
       info "Detected virtualization: $v — rootless Docker is usually viable on VMs/bare metal."
       ;;
     *)
-      [[ "$v" != "none" ]] && info "systemd-detect-virt: $v"
+      if [[ "$v" != "none" ]]; then info "systemd-detect-virt: $v"; fi
       ;;
   esac
-  [[ -f /run/.containerenv ]] && info "/run/.containerenv present (container)."
+  if [[ -f /run/.containerenv ]]; then info "/run/.containerenv present (container)."; fi
+  return 0
 }
 
 ensure_home() {
@@ -98,16 +121,24 @@ ensure_docker_ce_repo() {
   if [[ ! -f /etc/apt/sources.list.d/docker-ce.list ]]; then
     install -d /etc/apt/keyrings
     curl -fsSL "https://download.docker.com/linux/${DOCKER_APT_DISTRO}/gpg" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${DOCKER_APT_DISTRO} ${OS_CODENAME} stable" \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${DOCKER_APT_DISTRO} ${DOCKER_CE_CODENAME} stable" \
       > /etc/apt/sources.list.d/docker-ce.list
+    if [[ "$DOCKER_CE_CODENAME" != "$OS_CODENAME" ]]; then
+      info "Docker CE repo: using codename '${DOCKER_CE_CODENAME}' for OS release '${OS_CODENAME}' (CE repo ahead-of-release fallback)"
+    fi
   fi
 }
 
 install_docker_ce_cli_rootless() {
   apt-get update -qq
+  # Core userspace deps — always available in Debian/Ubuntu repos
   apt-get install -y --no-install-recommends \
     ca-certificates curl gnupg iptables \
-    slirp4netns fuse-overlayfs dbus-user-session uidmap \
+    slirp4netns fuse-overlayfs dbus-user-session uidmap 2>/dev/null || \
+  apt-get install -y --no-install-recommends \
+    ca-certificates curl gnupg iptables uidmap 2>/dev/null || true
+  # Docker CE packages from the Docker CE repo (requires ensure_docker_ce_repo first)
+  apt-get install -y --no-install-recommends \
     docker-ce-cli docker-ce-rootless-extras
 }
 
@@ -134,7 +165,7 @@ DOCKER_HOST=unix:///run/user/${uid}/docker.sock
 HOSTPANEL_TERMINAL_DOCKER=true
 EOF
   chmod 600 "$env_file"
-  chown hostpanel:hostpanel "$env_file" 2>/dev/null || true
+  chown root:root "$env_file" 2>/dev/null || true
   ok "Wrote rootless DOCKER_HOST to .env"
 }
 
@@ -149,7 +180,7 @@ DOCKER_HOST=unix:///var/run/docker.sock
 HOSTPANEL_TERMINAL_DOCKER=true
 EOF
   chmod 600 "$env_file"
-  chown hostpanel:hostpanel "$env_file" 2>/dev/null || true
+  chown root:root "$env_file" 2>/dev/null || true
   ok "Wrote rootful DOCKER_HOST to .env"
 }
 
@@ -172,7 +203,16 @@ docker_as_hostpanel() {
 }
 
 verify_docker_rootful() {
-  if docker_as_hostpanel docker info &>/dev/null; then
+  # Try as hostpanel user with sg to activate the docker group in the same command
+  if sg docker -c "docker info" &>/dev/null 2>&1; then
+    return 0
+  fi
+  # sg not available or not yet in group — fall back to sudo/runuser
+  if docker_as_hostpanel docker info &>/dev/null 2>&1; then
+    return 0
+  fi
+  # Last check: can root reach the socket? (daemon running but group not yet effective)
+  if docker info &>/dev/null 2>&1; then
     return 0
   fi
   return 1
@@ -209,7 +249,18 @@ finish_rootless_ok() {
   exit 0
 }
 
+reset_docker_context_to_default() {
+  # dockerd-rootless-setuptool may have switched the hostpanel user's context to "rootless".
+  # For rootful setups, reset it to "default" so docker commands work without DOCKER_HOST override.
+  if docker_as_hostpanel docker context inspect rootless &>/dev/null 2>&1; then
+    docker_as_hostpanel docker context use default 2>/dev/null || true
+    docker_as_hostpanel docker context rm rootless 2>/dev/null || true
+    ok "Reset docker context to 'default' for hostpanel user (removed stale 'rootless' context)"
+  fi
+}
+
 finish_rootful_ok() {
+  reset_docker_context_to_default
   append_env_rootful
   maybe_pull_alpine_rootful
   maybe_restart_hostpanel_api
@@ -226,7 +277,7 @@ install_rootful_docker_ce() {
     || apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io
   systemctl enable --now docker.service 2>/dev/null || true
   usermod -aG docker hostpanel 2>/dev/null || true
-  sleep 2
+  sleep 3
   if verify_docker_rootful; then
     ok "Rootful Docker is reachable at unix:///var/run/docker.sock"
     return 0
@@ -239,9 +290,11 @@ install_rootful_docker_io() {
   info "Installing distro docker.io (last resort — no Docker CE repo required)"
   apt-get update -qq
   apt-get install -y --no-install-recommends docker.io || return 1
+  # On Debian 13+ the CLI is split into docker-cli; install it if available
+  apt-get install -y --no-install-recommends docker-cli 2>/dev/null || true
   systemctl enable --now docker.service 2>/dev/null || systemctl enable --now docker.io 2>/dev/null || true
   usermod -aG docker hostpanel 2>/dev/null || true
-  sleep 2
+  sleep 3
   verify_docker_rootful
 }
 
@@ -316,7 +369,7 @@ runuser -u hostpanel -- env \
   "$SETUPTOOL" install --force
 ST=$?
 set -e
-[[ $ST -ne 0 ]] && warn "dockerd-rootless-setuptool install exited $ST — see https://rootlesscontaine.rs/getting-started/common/"
+if [[ $ST -ne 0 ]]; then warn "dockerd-rootless-setuptool install exited $ST — see https://rootlesscontaine.rs/getting-started/common/"; fi
 
 info "Start rootless Docker (user systemd)"
 runuser -u hostpanel -- env XDG_RUNTIME_DIR="$RUN_DIR" systemctl --user daemon-reload 2>/dev/null || true

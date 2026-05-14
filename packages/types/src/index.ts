@@ -50,6 +50,8 @@ export interface Site {
   webConfigPath?: string | null;
   dockerContainerId: string | null;
   rootPath: string;
+  /** Optional homepage filename for static/PHP (e.g. main.html) */
+  defaultDocument?: string | null;
   createdAt: string;
   updatedAt: string;
 }

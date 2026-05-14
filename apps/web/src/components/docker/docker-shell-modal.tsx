@@ -13,7 +13,7 @@ type DockerShellModalProps = {
 
 export function DockerShellModal({ containerRef, containerName, onClose }: DockerShellModalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
-  const xtermRef = useRef<{ term: { dispose: () => void }; fitAddon: { fit: () => void } } | null>(null);
+  const xtermRef = useRef<{ term: { dispose: () => void; focus: () => void }; fitAddon: { fit: () => void } } | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -84,9 +84,16 @@ export function DockerShellModal({ containerRef, containerName, onClose }: Docke
         term.write(String(data));
       };
 
+      fitAddon.fit();
+      // Defer focus to a rAF tick so the browser treats it as a paint-cycle
+      // call rather than a deep-async call — browsers silently drop focus()
+      // on off-screen elements invoked from inside Promise chains.
+      requestAnimationFrame(() => { if (!dead) term.focus(); });
+
       const wsUrl = getBrowserApiWebSocketBase();
       const token = localStorage.getItem("hp_token");
-      const path = `/api/docker/containers/${encodeURIComponent(containerRef)}/terminal`;
+      const sizeQuery = `?cols=${term.cols}&rows=${term.rows}`;
+      const path = `/api/docker/containers/${encodeURIComponent(containerRef)}/terminal${sizeQuery}`;
       const wsProto = token ? jwtToWebSocketProtocol(token) : "";
       const ws = token
         ? new WebSocket(`${wsUrl}${path}`, [wsProto])
@@ -101,17 +108,30 @@ export function DockerShellModal({ containerRef, containerName, onClose }: Docke
         return;
       }
 
-      /** Must be attached before any `term.write` from the server: ash sends `ESC[6n` (CPR) on the first prompt; xterm answers via `onData`. If `onData` is only registered in `ws.onopen`, the first WS frames can arrive first and garble the session. */
       const pendingStdin: string[] = [];
       term.onData((sendData) => {
         if (ws.readyState === WebSocket.OPEN) ws.send(sendData);
         else pendingStdin.push(sendData);
       });
 
+      const sendResize = (cols: number, rows: number) => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(new TextEncoder().encode(JSON.stringify({ r: [cols, rows] })));
+        }
+      };
+
+      term.onResize(({ cols, rows }) => sendResize(cols, rows));
+
       ws.onopen = () => {
         for (const chunk of pendingStdin) ws.send(chunk);
         pendingStdin.length = 0;
-        fitAddon.fit();
+        // PTY already created with correct size from URL params; only send
+        // resize if the browser window changed between fitAddon.fit() and WS open.
+        if (term.cols !== parseInt(new URL(ws.url).searchParams.get("cols") ?? "0") ||
+            term.rows !== parseInt(new URL(ws.url).searchParams.get("rows") ?? "0")) {
+          sendResize(term.cols, term.rows);
+        }
+        term.focus();
       };
 
       ws.onmessage = (e) => writeWsPayload(e.data);
@@ -166,7 +186,12 @@ export function DockerShellModal({ containerRef, containerName, onClose }: Docke
           Interactive <code className="text-[10px]">/bin/sh</code> via <code className="text-[10px]">docker exec -it</code> (PTY). Tenant
           sidecars open in <code className="text-[10px]">/srv</code> by default. Container must be running.
         </p>
-        <div ref={terminalRef} className="flex-1 min-h-0 p-2 bg-[#0d1117]" />
+        {/* onClick re-focuses the hidden xterm textarea from a user-gesture context */}
+        <div
+          ref={terminalRef}
+          className="flex-1 min-h-0 p-2 bg-[#0d1117] cursor-text"
+          onClick={() => xtermRef.current?.term.focus()}
+        />
       </div>
     </div>
   );

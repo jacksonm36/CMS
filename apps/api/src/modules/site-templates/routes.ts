@@ -22,7 +22,14 @@ const templateFields = z.object({
   nodeVersion: nodeVersionEnum.optional().nullable(),
   pythonVersion: pythonVersionEnum.optional().nullable(),
   dbStackVersion: dbStackVersionEnum.optional().nullable(),
+  /** Leave null → port is auto-allocated per site at creation time */
   appProxyPort: z.number().int().min(1024).max(65535).optional().nullable(),
+  /** Docker network group name for modular setups */
+  networkGroup: z.string().max(80).regex(/^[a-z0-9][a-z0-9-]*$/).optional().nullable(),
+  /** True → container is a central service (DB/cache) accessible to all groups */
+  isCentralService: z.boolean().optional().default(false),
+  /** Default homepage filename for static / PHP sites from this template */
+  defaultDocument: z.string().max(260).optional().nullable(),
 });
 
 function refineTraefikTemplate<T extends { webServer?: unknown; type?: unknown }>(data: T, ctx: z.RefinementCtx): void {

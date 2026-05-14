@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import {
@@ -19,11 +19,30 @@ import {
   PlayCircle,
   Skull,
   Terminal,
+  Network,
+  Plus,
+  Save,
+  AlertCircle,
 } from "lucide-react";
 import { DockerShellModal } from "@/components/docker/docker-shell-modal";
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import type { DockerContainerRow } from "@hostpanel/types";
+
+type PortBinding = {
+  containerPort: string;
+  hostIp: string;
+  hostPort: string;
+};
+
+type DockerInspectData = {
+  id: string;
+  name: string;
+  image: string;
+  portBindings: PortBinding[];
+  networkMode: string;
+  isSidecar: boolean;
+};
 
 type PanelUser = {
   id: string;
@@ -136,6 +155,45 @@ export default function DockerPage() {
       ),
     enabled: Boolean(logsTarget?.ref),
   });
+
+  const [portsTarget, setPortsTarget] = useState<{ ref: string; name: string } | null>(null);
+  const [editedPorts, setEditedPorts] = useState<PortBinding[]>([]);
+  const [portsError, setPortsError] = useState<string | null>(null);
+
+  const inspectQuery = useQuery({
+    queryKey: ["docker", "inspect", portsTarget?.ref],
+    queryFn: () =>
+      apiClient.get<{ data: DockerInspectData }>(
+        `/docker/containers/${encodeURIComponent(portsTarget!.ref)}/inspect`
+      ),
+    enabled: Boolean(portsTarget?.ref),
+  });
+
+  const portsMutation = useMutation({
+    mutationFn: ({ ref, portBindings }: { ref: string; portBindings: PortBinding[] }) =>
+      apiClient.post(`/docker/containers/${encodeURIComponent(ref)}/ports`, { portBindings }),
+    onSuccess: () => {
+      setPortsTarget(null);
+      queryClient.invalidateQueries({ queryKey: ["docker", "containers"] });
+      queryClient.invalidateQueries({ queryKey: ["docker", "inspect"] });
+    },
+    onError: (e) => setPortsError(e instanceof Error ? e.message : String(e)),
+  });
+
+  const openPortsModal = useCallback((ref: string, name: string) => {
+    setPortsError(null);
+    setPortsTarget({ ref, name });
+    setEditedPorts([]);
+  }, []);
+
+  // Sync editedPorts when inspect data loads
+  useEffect(() => {
+    if (inspectQuery.data?.data) {
+      setEditedPorts(inspectQuery.data.data.portBindings.length > 0
+        ? inspectQuery.data.data.portBindings
+        : []);
+    }
+  }, [inspectQuery.data]);
 
   if (authLoading || !user || !canUseDocker) {
     return (
@@ -394,6 +452,17 @@ export default function DockerPage() {
                           {staff ? (
                             <button
                               type="button"
+                              disabled={!ref}
+                              onClick={() => openPortsModal(ref, containerName(row))}
+                              className="p-1.5 rounded-md border border-border hover:bg-secondary disabled:opacity-40"
+                              title="Manage port bindings (recreates container)"
+                            >
+                              <Network className="w-3.5 h-3.5" />
+                            </button>
+                          ) : null}
+                          {staff ? (
+                            <button
+                              type="button"
                               disabled={!ref || actionMutation.isPending}
                               onClick={() => {
                                 const n = containerName(row);
@@ -481,6 +550,174 @@ export default function DockerPage() {
                 <pre className="text-[11px] leading-relaxed font-mono whitespace-pre-wrap break-all text-muted-foreground">
                   {logsQuery.data?.data?.logs ?? ""}
                 </pre>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {portsTarget ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="docker-ports-title"
+        >
+          <div className="w-full max-w-2xl rounded-xl border bg-card shadow-lg flex flex-col">
+            <div className="flex items-center justify-between gap-2 px-4 py-3 border-b border-border">
+              <h3 id="docker-ports-title" className="font-semibold text-sm flex items-center gap-2 truncate">
+                <Network className="w-4 h-4 text-primary shrink-0" />
+                Port bindings —{" "}
+                <span className="font-mono text-xs">{portsTarget.name}</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => {
+                  setPortsTarget(null);
+                  void queryClient.removeQueries({ queryKey: ["docker", "inspect", portsTarget.ref] });
+                }}
+                className="p-2 rounded-lg border border-border hover:bg-secondary"
+                aria-label="Close"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-4 space-y-4">
+              {inspectQuery.isLoading ? (
+                <div className="flex justify-center py-8 text-muted-foreground">
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                </div>
+              ) : inspectQuery.isError ? (
+                <p className="text-sm text-destructive">{(inspectQuery.error as Error).message}</p>
+              ) : inspectQuery.data?.data?.isSidecar ? (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-amber-400 space-y-1">
+                  <p className="font-medium">Site isolation container</p>
+                  <p className="text-xs text-amber-400/80">
+                    This is a HostPanel tenant sidecar (<code className="text-[10px]">hostpanel-site-*</code>). It uses{" "}
+                    <code className="text-[10px]">--network none</code> and runs{" "}
+                    <code className="text-[10px]">sleep infinity</code> as a filesystem-only shell target.
+                    HTTP/HTTPS traffic is served by <strong>nginx on the host</strong> (:80/:443) — not by this container.
+                    Port management is not applicable here.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <div className="text-xs text-muted-foreground rounded-lg border border-border/60 bg-secondary/20 px-3 py-2 space-y-1">
+                    <p>
+                      <strong className="text-foreground/80">Network mode:</strong>{" "}
+                      <code className="text-[10px]">{inspectQuery.data?.data?.networkMode ?? "—"}</code>
+                    </p>
+                    <p className="text-muted-foreground/70">
+                      Applying changes will <strong className="text-foreground/70">stop, remove, and recreate</strong> the container
+                      with the same image, volumes, env, and labels but new port bindings.
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="grid grid-cols-[1fr_1fr_1fr_auto] gap-2 text-xs font-medium text-muted-foreground px-1">
+                      <span>Host port</span>
+                      <span>Container port</span>
+                      <span>Host IP (optional)</span>
+                      <span />
+                    </div>
+
+                    {editedPorts.map((pb, i) => (
+                      <div key={i} className="grid grid-cols-[1fr_1fr_1fr_auto] gap-2 items-center">
+                        <input
+                          type="number"
+                          min={1}
+                          max={65535}
+                          value={pb.hostPort}
+                          onChange={(e) => {
+                            const next = [...editedPorts];
+                            next[i] = { ...next[i]!, hostPort: e.target.value };
+                            setEditedPorts(next);
+                            setPortsError(null);
+                          }}
+                          placeholder="e.g. 8080"
+                          className="px-2 py-1.5 rounded-md border border-border bg-background text-sm font-mono focus:outline-none focus:ring-1 focus:ring-primary"
+                        />
+                        <input
+                          type="text"
+                          value={pb.containerPort}
+                          onChange={(e) => {
+                            const next = [...editedPorts];
+                            next[i] = { ...next[i]!, containerPort: e.target.value };
+                            setEditedPorts(next);
+                            setPortsError(null);
+                          }}
+                          placeholder="e.g. 80/tcp"
+                          className="px-2 py-1.5 rounded-md border border-border bg-background text-sm font-mono focus:outline-none focus:ring-1 focus:ring-primary"
+                        />
+                        <input
+                          type="text"
+                          value={pb.hostIp === "0.0.0.0" ? "" : pb.hostIp}
+                          onChange={(e) => {
+                            const next = [...editedPorts];
+                            next[i] = { ...next[i]!, hostIp: e.target.value || "0.0.0.0" };
+                            setEditedPorts(next);
+                            setPortsError(null);
+                          }}
+                          placeholder="0.0.0.0"
+                          className="px-2 py-1.5 rounded-md border border-border bg-background text-sm font-mono focus:outline-none focus:ring-1 focus:ring-primary"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setEditedPorts(editedPorts.filter((_, j) => j !== i))}
+                          className="p-1.5 rounded-md border border-destructive/40 text-destructive hover:bg-destructive/10"
+                          title="Remove this binding"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setEditedPorts([...editedPorts, { hostPort: "", containerPort: "80/tcp", hostIp: "0.0.0.0" }])
+                      }
+                      className="flex items-center gap-1.5 text-xs px-2 py-1.5 rounded-md border border-dashed border-border hover:bg-secondary text-muted-foreground"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      Add port binding
+                    </button>
+                  </div>
+
+                  {portsError ? (
+                    <div className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                      {portsError}
+                    </div>
+                  ) : null}
+
+                  <div className="flex justify-end gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setPortsTarget(null)}
+                      className="px-3 py-1.5 text-sm rounded-md border border-border hover:bg-secondary"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      disabled={portsMutation.isPending}
+                      onClick={() => {
+                        setPortsError(null);
+                        portsMutation.mutate({ ref: portsTarget.ref, portBindings: editedPorts });
+                      }}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
+                    >
+                      {portsMutation.isPending ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Save className="w-3.5 h-3.5" />
+                      )}
+                      Apply &amp; recreate
+                    </button>
+                  </div>
+                </>
               )}
             </div>
           </div>

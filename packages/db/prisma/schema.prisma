@@ -81,8 +81,14 @@ model Site {
   pythonVersion       String?
   /// Preferred DB server stack label (e.g. "postgresql-16") — documentation & provisioning hints
   dbStackVersion      String?
-  /// Reverse-proxy target port for Node/Python apps (default 3000)
+  /// Reverse-proxy target port for Node/Python/PHP apps — auto-allocated from 10000-19999
   appProxyPort        Int?
+  /// Docker network group name for modular setups (containers in same group can communicate)
+  networkGroup        String?
+  /// Central service (DB, cache, message broker) accessible to all group networks
+  isCentralService    Boolean   @default(false)
+  /// Optional root filename for static / PHP (e.g. main.html) when index.html is absent
+  defaultDocument     String?
   dockerContainerId   String?
   rootPath            String
   webConfigPath       String?
@@ -139,6 +145,12 @@ model SiteTemplate {
   pythonVersion    String?
   dbStackVersion   String?
   appProxyPort     Int?
+  /// Docker network group for sites provisioned from this template
+  networkGroup     String?
+  /// Mark this template's container as a central service (DB, cache, broker)
+  isCentralService Boolean     @default(false)
+  /// Default homepage file for sites created from this template (static / PHP)
+  defaultDocument  String?
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @updatedAt
 

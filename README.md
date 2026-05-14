@@ -41,7 +41,7 @@ HP_CROWDSEC=true \
 curl -fsSL https://raw.githubusercontent.com/jacksonm36/CMS/main/install.sh | sudo bash
 ```
 
-The installer prints your admin credentials and panel URL at the end. Save them — the password is auto-generated and not stored in plain text after install.
+The installer asks for the **panel hostname or LAN IP** when run interactively (TTY), so NextAuth, CORS, and the optional Nginx vhost match how you open the UI. Piped installs (`curl … | bash`) skip that prompt unless you set `HP_DOMAIN`. The installer prints your admin credentials and panel URL at the end. Save them — the password is auto-generated and not stored in plain text after install.
 
 ---
 
@@ -51,7 +51,8 @@ The installer prints your admin credentials and panel URL at the end. Save them 
 |---|---|---|
 | `HP_ADMIN_EMAIL` | `admin@localhost` | Initial admin email |
 | `HP_ADMIN_PASSWORD` | *(auto-generated)* | Initial admin password |
-| `HP_DOMAIN` | *(server IP)* | Domain for the panel vhost |
+| `HP_DOMAIN` | *(auto LAN IP)* | FQDN or IP for panel URLs + optional Nginx `server_name`; empty on an interactive TTY prompts |
+| `HP_SKIP_PANEL_HOST_PROMPT` | `false` | Set `true` to skip the hostname prompt (keep empty domain → LAN IP) |
 | `HP_PORT` | `3000` | Web UI port |
 | `HP_API_PORT` | `4000` | API port |
 | `HP_WEBSERVER` | `nginx` | `nginx` \| `apache2` \| `lighttpd` \| `litespeed` \| `caddy` \| `openresty` \| `traefik` |
@@ -279,6 +280,8 @@ node scripts/smoke-test.mjs   # basic API health check
 
 Copy `.env.example` to `.env` and fill in your values. Never commit `.env`.
 
+On production installs (`install.sh`), `/opt/hostpanel/.env` is **root:root** mode **600**: only root can read it; **systemd** reads `EnvironmentFile=` as root and passes variables into `hostpanel-api` / `hostpanel-web`, so the `hostpanel` user does not need file access to secrets.
+
 ```bash
 cp .env.example .env
 ```
@@ -286,6 +289,7 @@ cp .env.example .env
 | Variable | Required | Description |
 |---|---|---|
 | `DATABASE_URL` | ✅ | PostgreSQL connection string |
+| `HOSTPANEL_AUTO_MIGRATE` | — | When `true`, or unset with `NODE_ENV=production`, API runs `prisma migrate deploy` at startup (uses env from systemd; process never reads `.env`). Set `false` to disable. |
 | `REDIS_URL` | ✅ | Redis connection string |
 | `JWT_SECRET` | ✅ | At least 32 random characters |
 | `JWT_REFRESH_SECRET` | ✅ | At least 32 random characters |

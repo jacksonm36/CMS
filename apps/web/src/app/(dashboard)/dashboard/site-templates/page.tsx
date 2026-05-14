@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Loader2, Plus, Trash2, LayoutTemplate } from "lucide-react";
+import { Loader2, Plus, Trash2, LayoutTemplate, Pencil, X, Network, Database } from "lucide-react";
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 
@@ -19,22 +19,324 @@ type SiteTemplateRow = {
   pythonVersion: string | null;
   dbStackVersion: string | null;
   appProxyPort: number | null;
+  networkGroup: string | null;
+  isCentralService: boolean;
+  defaultDocument: string | null;
 };
+
+type TemplateForm = {
+  name: string;
+  slug: string;
+  type: string;
+  webServer: string;
+  phpVersion: string;
+  nodeVersion: string;
+  pythonVersion: string;
+  dbStackVersion: string;
+  appProxyPort: number | null;
+  description: string;
+  networkGroup: string;
+  isCentralService: boolean;
+  defaultDocument: string;
+};
+
+const emptyForm = (): TemplateForm => ({
+  name: "",
+  slug: "",
+  type: "nodejs",
+  webServer: "nginx",
+  phpVersion: "8.3",
+  nodeVersion: "20",
+  pythonVersion: "3.12",
+  dbStackVersion: "postgresql-16",
+  appProxyPort: null,
+  description: "",
+  networkGroup: "",
+  isCentralService: false,
+  defaultDocument: "",
+});
+
+function templateToForm(t: SiteTemplateRow): TemplateForm {
+  return {
+    name: t.name,
+    slug: t.slug,
+    type: t.type,
+    webServer: t.webServer,
+    phpVersion: t.phpVersion ?? "8.3",
+    nodeVersion: t.nodeVersion ?? "20",
+    pythonVersion: t.pythonVersion ?? "3.12",
+    dbStackVersion: t.dbStackVersion ?? "postgresql-16",
+    appProxyPort: t.appProxyPort,
+    description: t.description ?? "",
+    networkGroup: t.networkGroup ?? "",
+    isCentralService: t.isCentralService ?? false,
+    defaultDocument: t.defaultDocument ?? "",
+  };
+}
+
+function buildPayload(form: TemplateForm) {
+  const slug =
+    form.slug.trim() ||
+    form.name.toLowerCase().trim().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "") ||
+    "template";
+  const homepage =
+    form.type === "static" || form.type === "php"
+      ? form.defaultDocument.trim() || null
+      : null;
+  return {
+    name: form.name,
+    slug,
+    description: form.description || null,
+    type: form.type,
+    webServer: form.webServer,
+    nodeVersion: form.type === "nodejs" ? form.nodeVersion : null,
+    pythonVersion: form.type === "python" ? form.pythonVersion : null,
+    phpVersion: form.type === "php" ? form.phpVersion : null,
+    dbStackVersion: form.dbStackVersion || null,
+    appProxyPort: form.appProxyPort || null, // null = auto-assign per site
+    networkGroup: form.networkGroup.trim() || null,
+    isCentralService: form.isCentralService,
+    defaultDocument: homepage,
+  };
+}
+
+function ModularSetupSection({
+  networkGroup,
+  isCentralService,
+  existingGroups,
+  onChange,
+}: {
+  networkGroup: string;
+  isCentralService: boolean;
+  existingGroups: string[];
+  onChange: (patch: { networkGroup?: string; isCentralService?: boolean }) => void;
+}) {
+  const enabled = networkGroup.trim().length > 0 || isCentralService;
+
+  return (
+    <div className="rounded-lg border border-border bg-secondary/10 p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Network className="w-4 h-4 text-primary" />
+          <span className="text-sm font-medium">Modular networking</span>
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            if (enabled) {
+              onChange({ networkGroup: "", isCentralService: false });
+            } else {
+              onChange({ networkGroup: "default" });
+            }
+          }}
+          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+            enabled ? "bg-primary" : "bg-secondary border border-input"
+          }`}
+        >
+          <span
+            className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${
+              enabled ? "translate-x-4" : "translate-x-0.5"
+            }`}
+          />
+        </button>
+      </div>
+
+      {enabled && (
+        <div className="space-y-3 pt-1">
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            Containers in the same group share a Docker bridge network (ICC enabled) and can communicate
+            directly. Containers in different groups remain fully isolated.
+          </p>
+
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium">Group name</label>
+            <div className="flex gap-2">
+              <input
+                value={networkGroup}
+                onChange={(e) => onChange({ networkGroup: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "") })}
+                placeholder="e.g. my-saas, ecommerce-backend"
+                className="flex h-8 flex-1 rounded-md border border-input bg-background px-2.5 text-sm"
+              />
+              {existingGroups.length > 0 && (
+                <select
+                  value=""
+                  onChange={(e) => { if (e.target.value) onChange({ networkGroup: e.target.value }); }}
+                  className="h-8 rounded-md border border-input bg-background px-2 text-xs text-muted-foreground"
+                >
+                  <option value="">Existing…</option>
+                  {existingGroups.map((g) => <option key={g} value={g}>{g}</option>)}
+                </select>
+              )}
+            </div>
+          </div>
+
+          <label className="flex items-start gap-2.5 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={isCentralService}
+              onChange={(e) => onChange({ isCentralService: e.target.checked })}
+              className="mt-0.5 accent-primary"
+            />
+            <span className="text-xs text-muted-foreground leading-relaxed">
+              <span className="flex items-center gap-1 text-foreground font-medium text-sm">
+                <Database className="w-3.5 h-3.5" /> Central service
+              </span>
+              This container (DB, cache, broker) is automatically connected to
+              <em> all</em> group networks so every module can reach it without
+              explicit wiring.
+            </span>
+          </label>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TemplateFormFields({
+  form,
+  existingGroups,
+  onChange,
+}: {
+  form: TemplateForm;
+  existingGroups: string[];
+  onChange: (f: TemplateForm) => void;
+}) {
+  const set = (patch: Partial<TemplateForm>) => onChange({ ...form, ...patch });
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium">Name</label>
+          <input
+            value={form.name}
+            onChange={(e) => set({ name: e.target.value })}
+            className="flex h-9 w-full rounded-md border border-input bg-secondary/50 px-3 text-sm"
+            placeholder="Node 20 + Nginx + PG16"
+          />
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium">Slug</label>
+          <input
+            value={form.slug}
+            onChange={(e) => set({ slug: e.target.value })}
+            className="flex h-9 w-full rounded-md border border-input bg-secondary/50 px-3 text-sm"
+            placeholder="node-20-nginx-pg16"
+          />
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium">Site type</label>
+          <select value={form.type} onChange={(e) => set({ type: e.target.value })}
+            className="flex h-9 w-full rounded-md border border-input bg-secondary/50 px-3 text-sm">
+            <option value="nodejs">Node.js</option>
+            <option value="python">Python</option>
+            <option value="php">PHP</option>
+            <option value="static">Static</option>
+          </select>
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium">Edge web server</label>
+          <select value={form.webServer} onChange={(e) => set({ webServer: e.target.value })}
+            className="flex h-9 w-full rounded-md border border-input bg-secondary/50 px-3 text-sm">
+            <option value="nginx">Nginx</option>
+            <option value="caddy">Caddy</option>
+            <option value="apache2">Apache2</option>
+            <option value="traefik">Traefik</option>
+          </select>
+        </div>
+        {form.type === "nodejs" && (
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium">Node version</label>
+            <select value={form.nodeVersion} onChange={(e) => set({ nodeVersion: e.target.value })}
+              className="flex h-9 w-full rounded-md border border-input bg-secondary/50 px-3 text-sm">
+              {["18", "20", "22", "24"].map((v) => <option key={v} value={v}>Node {v}</option>)}
+            </select>
+          </div>
+        )}
+        {form.type === "python" && (
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium">Python version</label>
+            <select value={form.pythonVersion} onChange={(e) => set({ pythonVersion: e.target.value })}
+              className="flex h-9 w-full rounded-md border border-input bg-secondary/50 px-3 text-sm">
+              {["3.10", "3.11", "3.12", "3.13"].map((v) => <option key={v} value={v}>Python {v}</option>)}
+            </select>
+          </div>
+        )}
+        {form.type === "php" && (
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium">PHP version</label>
+            <select value={form.phpVersion} onChange={(e) => set({ phpVersion: e.target.value })}
+              className="flex h-9 w-full rounded-md border border-input bg-secondary/50 px-3 text-sm">
+              {["8.0", "8.1", "8.2", "8.3", "8.4"].map((v) => <option key={v} value={v}>PHP {v}</option>)}
+            </select>
+          </div>
+        )}
+        {(form.type === "static" || form.type === "php") && (
+          <div className="space-y-1.5 sm:col-span-2">
+            <label className="text-sm font-medium">
+              Default homepage file{" "}
+              <span className="text-xs font-normal text-muted-foreground">(optional)</span>
+            </label>
+            <input
+              value={form.defaultDocument}
+              onChange={(e) => set({ defaultDocument: e.target.value })}
+              placeholder="e.g. main.html — empty uses index.html"
+              className="flex h-9 w-full rounded-md border border-input bg-secondary/50 px-3 text-sm font-mono"
+            />
+          </div>
+        )}
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium">Database</label>
+          <select value={form.dbStackVersion} onChange={(e) => set({ dbStackVersion: e.target.value })}
+            className="flex h-9 w-full rounded-md border border-input bg-secondary/50 px-3 text-sm">
+            <option value="">None</option>
+            <option value="postgresql-15">PostgreSQL 15</option>
+            <option value="postgresql-16">PostgreSQL 16</option>
+            <option value="postgresql-17">PostgreSQL 17</option>
+            <option value="mysql-8.0">MySQL 8.0</option>
+            <option value="mariadb-10.11">MariaDB 10.11</option>
+          </select>
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium">
+            App port{" "}
+            <span className="text-xs font-normal text-muted-foreground">(blank = auto-assign)</span>
+          </label>
+          <input
+            type="number"
+            min={1024}
+            max={65535}
+            value={form.appProxyPort ?? ""}
+            onChange={(e) => set({ appProxyPort: e.target.value ? Number(e.target.value) : null })}
+            placeholder="Auto (10000–19999)"
+            className="flex h-9 w-full rounded-md border border-input bg-secondary/50 px-3 text-sm"
+          />
+        </div>
+        <div className="space-y-1.5 sm:col-span-2">
+          <label className="text-sm font-medium">Description <span className="text-muted-foreground font-normal">(optional)</span></label>
+          <input value={form.description} onChange={(e) => set({ description: e.target.value })}
+            placeholder="Standard Node.js stack with Nginx and PostgreSQL"
+            className="flex h-9 w-full rounded-md border border-input bg-secondary/50 px-3 text-sm" />
+        </div>
+      </div>
+
+      <ModularSetupSection
+        networkGroup={form.networkGroup}
+        isCentralService={form.isCentralService}
+        existingGroups={existingGroups}
+        onChange={(patch) => set(patch)}
+      />
+    </div>
+  );
+}
 
 export default function SiteTemplatesPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
   const { user, loading } = useAuth();
   const [showCreate, setShowCreate] = useState(false);
-  const [form, setForm] = useState({
-    name: "",
-    slug: "",
-    type: "nodejs" as SiteTemplateRow["type"],
-    webServer: "nginx",
-    nodeVersion: "20",
-    appProxyPort: 3000 as number | null,
-    description: "",
-  });
+  const [createForm, setCreateForm] = useState<TemplateForm>(emptyForm());
+  const [editId, setEditId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState<TemplateForm>(emptyForm());
 
   useEffect(() => {
     if (!loading && user && user.role !== "superadmin" && user.role !== "admin") {
@@ -48,41 +350,27 @@ export default function SiteTemplatesPage() {
     enabled: !!user && (user.role === "superadmin" || user.role === "admin"),
   });
 
+  const { data: groupsRes } = useQuery({
+    queryKey: ["sites", "network-groups"],
+    queryFn: () => apiClient.get<{ data: string[] }>("/sites/network-groups"),
+    enabled: !!user && (user.role === "superadmin" || user.role === "admin"),
+  });
+  const existingGroups = groupsRes?.data ?? [];
+
   const createMutation = useMutation({
-    mutationFn: async () => {
-      const slug =
-        form.slug.trim() ||
-        form.name
-          .toLowerCase()
-          .trim()
-          .replace(/\s+/g, "-")
-          .replace(/[^a-z0-9-]/g, "") ||
-        "template";
-      return apiClient.post("/site-templates", {
-        name: form.name,
-        slug,
-        description: form.description || null,
-        type: form.type,
-        webServer: form.webServer,
-        nodeVersion: form.type === "nodejs" ? form.nodeVersion : null,
-        pythonVersion: form.type === "python" ? "3.12" : null,
-        phpVersion: form.type === "php" ? "8.2" : null,
-        dbStackVersion: "postgresql-16",
-        appProxyPort: form.type === "nodejs" || form.type === "python" ? form.appProxyPort : null,
-      });
-    },
+    mutationFn: () => apiClient.post("/site-templates", buildPayload(createForm)),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["site-templates"] });
       setShowCreate(false);
-      setForm({
-        name: "",
-        slug: "",
-        type: "nodejs",
-        webServer: "nginx",
-        nodeVersion: "20",
-        appProxyPort: 3000,
-        description: "",
-      });
+      setCreateForm(emptyForm());
+    },
+  });
+
+  const editMutation = useMutation({
+    mutationFn: () => apiClient.patch(`/site-templates/${editId}`, buildPayload(editForm)),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["site-templates"] });
+      setEditId(null);
     },
   });
 
@@ -98,7 +386,6 @@ export default function SiteTemplatesPage() {
       </div>
     );
   }
-
   if (user.role !== "superadmin" && user.role !== "admin") return null;
 
   const templates = data?.data ?? [];
@@ -111,108 +398,37 @@ export default function SiteTemplatesPage() {
             <LayoutTemplate className="w-6 h-6" /> Site templates
           </h2>
           <p className="text-sm text-muted-foreground mt-1">
-            Presets for customer sites (e.g. Node VPS-style stack). Provision via{" "}
-            <code className="text-xs px-1 rounded bg-muted">POST /api/sites/from-template</code> or assign when creating sites from the API.
+            Presets for customer sites. Stack tools auto-install in the Docker sidecar.
+            Ports auto-assign from 10000–19999 — no conflicts. Use{" "}
+            <span className="font-medium text-foreground">Modular networking</span> to
+            let containers in the same group communicate (microservices, shared DB, etc).
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => setShowCreate(true)}
-          className="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90"
-        >
+        <button type="button" onClick={() => { setShowCreate(true); setEditId(null); }}
+          className="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90 shrink-0">
           <Plus className="w-4 h-4" /> New template
         </button>
       </div>
 
       {showCreate && (
         <div className="rounded-xl border bg-card p-5 space-y-4">
-          <h3 className="font-medium">Create template</h3>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium">Name</label>
-              <input
-                value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })}
-                className="flex h-9 w-full rounded-md border border-input bg-secondary/50 px-3 text-sm"
-                placeholder="Node 20 + Nginx"
-              />
-            </div>
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium">Slug</label>
-              <input
-                value={form.slug}
-                onChange={(e) => setForm({ ...form, slug: e.target.value })}
-                className="flex h-9 w-full rounded-md border border-input bg-secondary/50 px-3 text-sm"
-                placeholder="node-20-nginx"
-              />
-            </div>
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium">Site type</label>
-              <select
-                value={form.type}
-                onChange={(e) => setForm({ ...form, type: e.target.value })}
-                className="flex h-9 w-full rounded-md border border-input bg-secondary/50 px-3 text-sm"
-              >
-                <option value="nodejs">Node.js</option>
-                <option value="python">Python</option>
-                <option value="php">PHP</option>
-                <option value="static">Static</option>
-              </select>
-            </div>
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium">Edge web server</label>
-              <select
-                value={form.webServer}
-                onChange={(e) => setForm({ ...form, webServer: e.target.value })}
-                className="flex h-9 w-full rounded-md border border-input bg-secondary/50 px-3 text-sm"
-              >
-                <option value="nginx">Nginx</option>
-                <option value="caddy">Caddy</option>
-                <option value="apache2">Apache2</option>
-                <option value="traefik">Traefik</option>
-              </select>
-            </div>
-            {form.type === "nodejs" && (
-              <div className="space-y-1.5">
-                <label className="text-sm font-medium">Node line</label>
-                <input
-                  value={form.nodeVersion}
-                  onChange={(e) => setForm({ ...form, nodeVersion: e.target.value })}
-                  className="flex h-9 w-full rounded-md border border-input bg-secondary/50 px-3 text-sm"
-                />
-              </div>
-            )}
-            {(form.type === "nodejs" || form.type === "python") && (
-              <div className="space-y-1.5">
-                <label className="text-sm font-medium">App proxy port</label>
-                <input
-                  type="number"
-                  min={1024}
-                  max={65535}
-                  value={form.appProxyPort ?? 3000}
-                  onChange={(e) => setForm({ ...form, appProxyPort: Number(e.target.value) || 3000 })}
-                  className="flex h-9 w-full rounded-md border border-input bg-secondary/50 px-3 text-sm"
-                />
-              </div>
-            )}
-          </div>
-          <div className="flex gap-2">
-            <button type="button" onClick={() => setShowCreate(false)} className="h-9 px-4 rounded-md border text-sm">
-              Cancel
+          <div className="flex items-center justify-between">
+            <h3 className="font-medium">Create template</h3>
+            <button type="button" onClick={() => setShowCreate(false)} className="p-1 rounded hover:bg-secondary">
+              <X className="w-4 h-4" />
             </button>
-            <button
-              type="button"
-              disabled={createMutation.isPending || !form.name}
+          </div>
+          <TemplateFormFields form={createForm} existingGroups={existingGroups} onChange={setCreateForm} />
+          <div className="flex gap-2">
+            <button type="button" onClick={() => setShowCreate(false)} className="h-9 px-4 rounded-md border text-sm">Cancel</button>
+            <button type="button" disabled={createMutation.isPending || !createForm.name}
               onClick={() => createMutation.mutate()}
-              className="h-9 px-4 rounded-md bg-primary text-primary-foreground text-sm disabled:opacity-50 inline-flex items-center gap-2"
-            >
+              className="h-9 px-4 rounded-md bg-primary text-primary-foreground text-sm disabled:opacity-50 inline-flex items-center gap-2">
               {createMutation.isPending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
               Save template
             </button>
           </div>
-          {createMutation.isError && (
-            <p className="text-sm text-destructive">{(createMutation.error as Error).message}</p>
-          )}
+          {createMutation.isError && <p className="text-sm text-destructive">{(createMutation.error as Error).message}</p>}
         </div>
       )}
 
@@ -221,30 +437,70 @@ export default function SiteTemplatesPage() {
           <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
         </div>
       ) : templates.length === 0 ? (
-        <p className="text-sm text-muted-foreground border rounded-xl p-8 text-center">No templates yet. Create one for reusable Node/PHP/Python presets.</p>
+        <p className="text-sm text-muted-foreground border rounded-xl p-8 text-center">
+          No templates yet. Create one for reusable Node/PHP/Python presets.
+        </p>
       ) : (
         <ul className="rounded-xl border divide-y">
           {templates.map((t) => (
-            <li key={t.id} className="p-4 flex items-start justify-between gap-4">
-              <div>
-                <p className="font-medium">{t.name}</p>
-                <p className="text-xs text-muted-foreground font-mono mt-0.5">{t.slug}</p>
-                <p className="text-sm text-muted-foreground mt-1 capitalize">
-                  {t.type} · {t.webServer}
-                  {t.nodeVersion ? ` · Node ${t.nodeVersion}` : ""}
-                  {t.appProxyPort != null ? ` · :${t.appProxyPort}` : ""}
-                </p>
+            <li key={t.id}>
+              <div className="p-4 flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="font-medium">{t.name}</p>
+                    {t.networkGroup && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] bg-primary/10 text-primary border border-primary/20">
+                        <Network className="w-3 h-3" /> {t.networkGroup}
+                        {t.isCentralService && " · central"}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-muted-foreground font-mono mt-0.5">{t.slug}</p>
+                  <p className="text-sm text-muted-foreground mt-1 capitalize">
+                    {t.type} · {t.webServer}
+                    {t.phpVersion ? ` · PHP ${t.phpVersion}` : ""}
+                    {t.nodeVersion ? ` · Node ${t.nodeVersion}` : ""}
+                    {t.pythonVersion ? ` · Python ${t.pythonVersion}` : ""}
+                    {t.dbStackVersion ? ` · ${t.dbStackVersion}` : ""}
+                    {t.appProxyPort != null ? ` · :${t.appProxyPort}` : " · port auto"}
+                    {(t.type === "static" || t.type === "php") && t.defaultDocument
+                      ? ` · home:${t.defaultDocument}`
+                      : ""}
+                  </p>
+                  {t.description && <p className="text-xs text-muted-foreground mt-1">{t.description}</p>}
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  <button type="button" title="Edit template"
+                    onClick={() => {
+                      if (editId === t.id) { setEditId(null); return; }
+                      setEditId(t.id); setEditForm(templateToForm(t)); setShowCreate(false);
+                    }}
+                    className="p-2 rounded-md hover:bg-secondary text-muted-foreground">
+                    <Pencil className="w-4 h-4" />
+                  </button>
+                  <button type="button" title="Delete template"
+                    onClick={() => { if (confirm(`Delete template "${t.name}"?`)) deleteMutation.mutate(t.id); }}
+                    className="p-2 rounded-md hover:bg-destructive/10 text-destructive">
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
-              <button
-                type="button"
-                title="Delete template"
-                onClick={() => {
-                  if (confirm(`Delete template "${t.name}"?`)) deleteMutation.mutate(t.id);
-                }}
-                className="p-2 rounded-md hover:bg-destructive/10 text-destructive"
-              >
-                <Trash2 className="w-4 h-4" />
-              </button>
+              {editId === t.id && (
+                <div className="px-4 pb-4 space-y-4 border-t bg-secondary/10">
+                  <p className="text-xs text-muted-foreground pt-3">Editing template</p>
+                  <TemplateFormFields form={editForm} existingGroups={existingGroups} onChange={setEditForm} />
+                  <div className="flex gap-2">
+                    <button type="button" onClick={() => setEditId(null)} className="h-9 px-4 rounded-md border text-sm">Cancel</button>
+                    <button type="button" disabled={editMutation.isPending || !editForm.name}
+                      onClick={() => editMutation.mutate()}
+                      className="h-9 px-4 rounded-md bg-primary text-primary-foreground text-sm disabled:opacity-50 inline-flex items-center gap-2">
+                      {editMutation.isPending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                      Save changes
+                    </button>
+                  </div>
+                  {editMutation.isError && <p className="text-sm text-destructive">{(editMutation.error as Error).message}</p>}
+                </div>
+              )}
             </li>
           ))}
         </ul>

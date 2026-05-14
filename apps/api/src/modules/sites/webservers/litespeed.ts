@@ -1,4 +1,5 @@
 import type { Site } from "@hostpanel/db";
+import { indexFilenamesForSite } from "../default-document.js";
 import { appUpstreamPort } from "./proxy-port.js";
 
 // LiteSpeed Community Edition uses Apache-compatible vhost syntax
@@ -10,6 +11,7 @@ export function generateConfig(site: Site): string {
   const phpVersion = site.phpVersion ?? "8.2";
   const upstream = appUpstreamPort(site);
   const phpHandler = `lsapi:/tmp/lshttpd/php${phpVersion.replace(".", "")}`;
+  const idxCsv = indexFilenamesForSite(site).join(", ");
 
   const phpBlock = site.type === "php" ? `
   # PHP via LiteSpeed API (LSAPI)
@@ -52,7 +54,7 @@ accesslog ${LSWS_LOG_DIR}/${site.domain}.access.log {
 
 index {
   useServer               0
-  indexFiles              index.html, index.php
+  indexFiles              ${idxCsv}
   autoIndex               0
 }
 

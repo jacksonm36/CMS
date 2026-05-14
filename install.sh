@@ -11,7 +11,8 @@
 #  Options (env vars before the script):
 #    HP_ADMIN_EMAIL=admin@example.com
 #    HP_ADMIN_PASSWORD=changeme
-#    HP_DOMAIN=panel.example.com      (optional, for Nginx vhost)
+#    HP_DOMAIN=panel.example.com      (optional; prompts on TTY if empty)
+#    HP_SKIP_PANEL_HOST_PROMPT=true    (non-interactive: use auto LAN IP)
 #    HP_PORT=3000                     (web UI port, default 3000)
 #    HP_API_PORT=4000                 (API port, default 4000)
 #    HP_WEBSERVER=nginx               (nginx|apache2|lighttpd|litespeed)
@@ -63,6 +64,7 @@ HP_RESTART_HOSTPANEL_API="${HP_RESTART_HOSTPANEL_API:-true}"
 HP_JWT_SECRET="$(openssl rand -base64 48 | tr -d '=+/')"
 HP_SESSION_SECRET="$(openssl rand -base64 48 | tr -d '=+/')"
 HP_DOMAIN="${HP_DOMAIN:-}"
+HP_SKIP_PANEL_HOST_PROMPT="${HP_SKIP_PANEL_HOST_PROMPT:-false}"
 
 REPO_URL="${HP_REPO_URL:-https://github.com/jacksonm36/CMS}"
 REPO_BRANCH="${HP_REPO_BRANCH:-main}"
@@ -408,6 +410,59 @@ else
   fi
 fi
 
+# ─── 8b. Panel hostname / IP (browser URL for NextAuth, CORS, optional Nginx vhost) ──
+normalize_panel_host() {
+  local h="$1"
+  h="$(printf '%s' "$h" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  [[ -z "$h" ]] && { printf '%s' ""; return 0; }
+  h="${h#http://}"
+  h="${h#https://}"
+  h="${h%%/*}"
+  printf '%s' "$h"
+}
+
+validate_panel_host() {
+  local h="$1"
+  [[ -n "$h" ]] || return 1
+  [[ "$h" != *[/[:space:]]* ]] || return 1
+  [[ "$h" != *:* ]] || return 1
+  if [[ "$h" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    local oIFS=$IFS IFS='.'
+    # shellcheck disable=SC2206
+    local parts=($h)
+    IFS=$oIFS
+    local oct
+    for oct in "${parts[@]}"; do
+      [[ "$oct" =~ ^[0-9]+$ && "$oct" -le 255 ]] || return 1
+    done
+    return 0
+  fi
+  [[ ${#h} -le 253 ]] || return 1
+  [[ "$h" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] && return 0
+  [[ ${#h} -eq 1 && "$h" =~ ^[A-Za-z0-9]$ ]] && return 0
+  return 1
+}
+
+if [[ -z "$HP_DOMAIN" && "$HP_SKIP_PANEL_HOST_PROMPT" != "true" && -t 0 ]]; then
+  step "Panel access hostname or IP"
+  echo -e "${CYAN}How will you open HostPanel in the browser?${NC}"
+  echo -e "  • Enter an ${BOLD}FQDN${NC} (e.g. panel.example.com) or ${BOLD}LAN IP${NC} (e.g. 192.168.1.50)."
+  echo -e "  • Do ${BOLD}not${NC} include http/https or port."
+  echo -e "  • Press Enter to auto-use this server's first LAN IP (quick LAN tests)."
+  read -r -p "Panel hostname or IP [empty = auto]: " _hp_panel_raw || true
+  _hp_panel_raw="$(normalize_panel_host "${_hp_panel_raw:-}")"
+  if [[ -n "$_hp_panel_raw" ]]; then
+    if validate_panel_host "$_hp_panel_raw"; then
+      HP_DOMAIN="$_hp_panel_raw"
+      success "Panel will use host: $HP_DOMAIN (Nginx vhost + NextAuth/CORS base)."
+    else
+      warn "Invalid host '$_hp_panel_raw' — using auto LAN IP instead."
+    fi
+  else
+    info "Using auto-detected LAN IP for NextAuth/CORS (remote browsers need this, not localhost)."
+  fi
+fi
+
 # ─── 9. Environment configuration ─────────────────────────────────────────────
 step "Writing environment configuration"
 
@@ -416,12 +471,19 @@ REDIS_URL="redis://127.0.0.1:6379"
 
 CS_KEY_FOR_ENV="${CS_API_KEY:-}"
 
-# NEXTAUTH / browser clients: use real LAN IP when no vhost domain (localhost breaks remote browsers)
+# NEXTAUTH_URL + CORS_ORIGIN must match the URL users open in the browser
 if [[ -n "$HP_DOMAIN" ]]; then
-  HP_NEXTAUTH_URL="http://${HP_DOMAIN}:${HP_PORT}"
+  if [[ "$HP_WEBSERVER" == "nginx" ]]; then
+    HP_NEXTAUTH_URL="http://${HP_DOMAIN}"
+    HP_CORS_ORIGIN="http://${HP_DOMAIN}"
+  else
+    HP_NEXTAUTH_URL="http://${HP_DOMAIN}:${HP_PORT}"
+    HP_CORS_ORIGIN="http://${HP_DOMAIN}:${HP_PORT}"
+  fi
 else
   HP_SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || echo '127.0.0.1')"
   HP_NEXTAUTH_URL="http://${HP_SERVER_IP}:${HP_PORT}"
+  HP_CORS_ORIGIN="http://${HP_SERVER_IP}:${HP_PORT}"
 fi
 
 cat > "$HP_INSTALL_DIR/.env" <<ENV
@@ -446,6 +508,9 @@ NEXT_PUBLIC_API_PORT=${HP_API_PORT}
 NEXTAUTH_URL="${HP_NEXTAUTH_URL}"
 PORT=${HP_PORT}
 
+# Browser origins allowed for credentialed API calls (matches panel URL by default)
+CORS_ORIGIN="${HP_CORS_ORIGIN}"
+
 # ─── Admin credentials ─────────────────────────────────────────────────────────
 ADMIN_EMAIL="${HP_ADMIN_EMAIL}"
 ADMIN_PASSWORD="${HP_ADMIN_PASSWORD}"
@@ -468,6 +533,10 @@ CROWDSEC_API_KEY="${CS_KEY_FOR_ENV}"
 
 # ─── Media uploads ─────────────────────────────────────────────────────────────
 MEDIA_DIR="${HP_INSTALL_DIR}/uploads"
+
+# ─── API lifecycle ─────────────────────────────────────────────────────────────
+# systemd sets NODE_ENV on the API unit; migrations run at startup when enabled below.
+HOSTPANEL_AUTO_MIGRATE=true
 ENV
 
 chmod 600 "$HP_INSTALL_DIR/.env"
@@ -510,6 +579,11 @@ fi
 chown -R hostpanel:hostpanel "$HP_INSTALL_DIR"
 mkdir -p "$HP_INSTALL_DIR/uploads" "$HP_INSTALL_DIR/certs"
 chown hostpanel:hostpanel "$HP_INSTALL_DIR/uploads" "$HP_INSTALL_DIR/certs"
+
+# Secrets: keep .env root-owned mode 600 so only root reads it; systemd still loads
+# EnvironmentFile= into hostpanel-api / hostpanel-web as root before dropping privileges.
+chown root:root "$HP_INSTALL_DIR/.env"
+chmod 600 "$HP_INSTALL_DIR/.env"
 
 # Allow hostpanel to reload web servers, install packages, etc. (sudoers)
 SUDOERS_FILE="/etc/sudoers.d/hostpanel"
@@ -554,7 +628,8 @@ if [[ "$HP_SKIP_DOCKER" != "true" && "$HP_DOCKER_ROOTLESS" == "true" ]]; then
     export HP_DOCKER_ROOTFUL_ONLY HP_DOCKER_TRY_ROOTLESS HP_DOCKER_FALLBACK_ROOTFUL HP_RESTART_HOSTPANEL_API HP_PULL_ALPINE HOSTPANEL_ALPINE_IMAGE
     bash "$DOCKER_SCRIPT" "$HP_INSTALL_DIR" "$OS_CODENAME" "$OS_ID" \
       || warn "Rootless Docker setup exited non-zero — check output; you can re-run: sudo bash $DOCKER_SCRIPT $HP_INSTALL_DIR $OS_CODENAME $OS_ID"
-    chown hostpanel:hostpanel "$HP_INSTALL_DIR/.env" 2>/dev/null || true
+    chown root:root "$HP_INSTALL_DIR/.env" 2>/dev/null || true
+    chmod 600 "$HP_INSTALL_DIR/.env" 2>/dev/null || true
   else
     warn "Missing $DOCKER_SCRIPT — skipping Docker install"
   fi
@@ -596,6 +671,7 @@ User=hostpanel
 Group=hostpanel
 WorkingDirectory=${HP_INSTALL_DIR}/apps/api
 EnvironmentFile=${HP_INSTALL_DIR}/.env
+Environment=NODE_ENV=production
 ExecStart=${NODE_BIN} --import ${TSX_LOADER} dist/index.js
 Restart=always
 RestartSec=5
@@ -747,8 +823,13 @@ echo -e "${BOLD}${GREEN}══════════════════�
 echo ""
 echo -e "  ${BOLD}Access URLs:${NC}"
 if [[ -n "$HP_DOMAIN" ]]; then
-echo -e "    Web UI : ${CYAN}http://${HP_DOMAIN}${NC}"
-echo -e "    API    : ${CYAN}http://${HP_DOMAIN}/api${NC}"
+  if [[ "$HP_WEBSERVER" == "nginx" ]]; then
+    echo -e "    Web UI : ${CYAN}http://${HP_DOMAIN}${NC}"
+    echo -e "    API    : ${CYAN}http://${HP_DOMAIN}/api${NC}"
+  else
+    echo -e "    Web UI : ${CYAN}http://${HP_DOMAIN}:${HP_PORT}${NC}"
+    echo -e "    API    : ${CYAN}http://${HP_DOMAIN}:${HP_API_PORT}${NC}"
+  fi
 else
 SERVER_IP=$(hostname -I | awk '{print $1}')
 echo -e "    Web UI : ${CYAN}http://${SERVER_IP}:${HP_PORT}${NC}"

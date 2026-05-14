@@ -1,4 +1,5 @@
 import type { Site } from "@hostpanel/db";
+import { indexFilenamesForSite } from "../default-document.js";
 import { appUpstreamPort } from "./proxy-port.js";
 
 export const LIGHTTPD_CONF_DIR = process.env.LIGHTTPD_CONF_DIR ?? "/etc/lighttpd/conf-enabled";
@@ -7,6 +8,7 @@ export const LIGHTTPD_LOG_DIR = process.env.LIGHTTPD_LOG_DIR ?? "/var/log/lightt
 export function generateConfig(site: Site): string {
   const phpVersion = site.phpVersion ?? "8.2";
   const upstream = appUpstreamPort(site);
+  const idxList = indexFilenamesForSite(site).map((n) => `"${n}"`).join(", ");
 
   const phpBlock = site.type === "php" ? `
 # PHP via FastCGI
@@ -32,7 +34,7 @@ proxy.server = (
   return `# HostPanel — managed by hostpanel (lighttpd)
 $HTTP["host"] =~ "^(www\\.)?${site.domain.replace(".", "\\.")}$" {
     server.document-root = "${site.rootPath}"
-    server.indexfiles     = ("index.html", "index.htm", "index.php")
+    server.indexfiles     = (${idxList})
 
     accesslog.filename = "${LIGHTTPD_LOG_DIR}/${site.domain}.access.log"
 

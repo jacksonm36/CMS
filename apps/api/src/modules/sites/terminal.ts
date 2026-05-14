@@ -1,18 +1,23 @@
 import type { FastifyInstance } from "fastify";
-import { spawn } from "child_process";
-import type { ChildProcessWithoutNullStreams } from "child_process";
+import pty from "node-pty";
+import type { IPty } from "node-pty";
 import { prisma } from "@hostpanel/db";
 import { canAccessSite } from "../../lib/site-access.js";
 import { verifyWsJwt } from "../../lib/ws-auth.js";
 import { userMayUseDockerExec } from "../../lib/docker-access.js";
-import { sanitizeDockerExecWorkdir, spawnDockerInteractiveShell, isValidDockerContainerIdRef } from "../../lib/docker-cli.js";
+import {
+  sanitizeDockerExecWorkdir,
+  spawnDockerInteractiveShell,
+  isValidDockerContainerIdRef,
+  parseResizeFrame,
+} from "../../lib/docker-cli.js";
 
 /** Site-scoped shell: JWT via cookie / Sec-WebSocket-Protocol / deprecated ?token= */
 export async function terminalRoutes(app: FastifyInstance): Promise<void> {
   app.get("/:id/terminal", { websocket: true }, async (socket, request) => {
     const { id } = request.params as { id: string };
 
-    const payload = await verifyWsJwt(app, request);
+    const payload = await verifyWsJwt(app, request, { allowQueryToken: false });
     if (!payload) {
       socket.send("\r\n\x1b[31mAuthentication failed\x1b[0m\r\n");
       socket.close();
@@ -31,9 +36,14 @@ export async function terminalRoutes(app: FastifyInstance): Promise<void> {
       return;
     }
 
+    const qs = request.query as Record<string, string | string[] | undefined>;
+    const initCols = Math.max(20, Math.min(parseInt(String(qs.cols ?? "220"), 10) || 220, 512));
+    const initRows = Math.max(5, Math.min(parseInt(String(qs.rows ?? "50"), 10) || 50, 200));
+
     const mayDocker = await userMayUseDockerExec(payload.sub, payload.role);
 
-    let shell: ChildProcessWithoutNullStreams | null = null;
+    let shell: IPty | null = null;
+    let shellDead = false;
 
     try {
       const useDocker =
@@ -49,51 +59,63 @@ export async function terminalRoutes(app: FastifyInstance): Promise<void> {
           return;
         }
         const workdir = sanitizeDockerExecWorkdir(process.env.HOSTPANEL_DOCKER_SITE_WORKDIR ?? "/srv", "/srv");
-        shell = spawnDockerInteractiveShell(site.dockerContainerId, workdir);
+        shell = spawnDockerInteractiveShell(site.dockerContainerId, workdir, initCols, initRows);
       } else {
-        const isWindows = process.platform === "win32";
-        shell = isWindows
-          ? spawn("cmd.exe", [], { env: { ...process.env, TERM: "xterm-256color" } })
-          : spawn("/bin/bash", ["--noprofile", "--norc"], {
-              cwd: site.rootPath,
-              env: {
-                ...process.env,
-                TERM: "xterm-256color",
-                HOME: site.rootPath,
-              },
-            });
+        const envRecord = Object.fromEntries(
+          Object.entries({
+            ...process.env,
+            TERM: "xterm-256color",
+            HOME: site.rootPath,
+            COLUMNS: String(initCols),
+            LINES: String(initRows),
+          }).filter((e): e is [string, string] => e[1] !== undefined)
+        );
+        shell = pty.spawn("/bin/bash", ["--noprofile", "--norc"], {
+          name: "xterm-256color",
+          cols: initCols,
+          rows: initRows,
+          cwd: site.rootPath,
+          env: envRecord,
+        });
       }
 
-      shell.stdout.on("data", (data: Buffer) => socket.send(data.toString("utf-8")));
-      shell.stderr.on("data", (data: Buffer) => socket.send(data.toString("utf-8")));
+      shell.onData((data: string) => {
+        try { socket.send(data); } catch { /* ignore */ }
+      });
 
-      shell.on("error", (err) => {
-        try {
-          const msg = err instanceof Error ? err.message : String(err);
-          socket.send(`\r\n\x1b[31mShell process error: ${msg}\x1b[0m\r\n`);
-        } catch {
-          /* ignore */
+      shell.onExit(() => {
+        shellDead = true;
+        try { socket.send("\r\n\x1b[33mShell exited\x1b[0m\r\n"); } catch { /* ignore */ }
+        socket.close();
+      });
+
+      socket.on("message", (raw: unknown) => {
+        if (!shell || shellDead) return;
+        // ws delivers ALL frames (including text) as Buffer; check for resize
+        // first, then fall through to writing keyboard input.
+        if (Buffer.isBuffer(raw)) {
+          const resize = parseResizeFrame(raw);
+          if (resize) {
+            try { shell.resize(resize.cols, resize.rows); } catch { /* ignore */ }
+            return;
+          }
+          shell.write(raw.toString("utf8"));
+          return;
         }
-        socket.close();
-      });
-
-      shell.on("exit", () => {
-        socket.send("\r\n\x1b[33mShell exited\x1b[0m\r\n");
-        socket.close();
-      });
-
-      socket.on("message", (raw: Buffer | string) => {
-        if (!shell || shell.killed) return;
-        const chunk = typeof raw === "string" ? raw : raw.toString("utf8");
-        shell.stdin.write(chunk);
+        shell.write(typeof raw === "string" ? raw : String(raw));
       });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      socket.send(`\r\n\x1b[31mCould not spawn shell: ${msg}\x1b[0m\r\n`);
+      try {
+        socket.send(`\r\n\x1b[31mCould not spawn shell: ${err instanceof Error ? err.message : String(err)}\x1b[0m\r\n`);
+      } catch { /* ignore */ }
+      socket.close();
     }
 
     socket.on("close", () => {
-      if (shell && !shell.killed) shell.kill();
+      if (shell && !shellDead) {
+        shellDead = true;
+        try { shell.kill(); } catch { /* ignore */ }
+      }
     });
   });
 }

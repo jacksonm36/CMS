@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
-import { Plus, Globe, Trash2, ExternalLink, Loader2, MoreVertical, Pause, Play, RefreshCw, Cpu, Box } from "lucide-react";
+import { Plus, Globe, Trash2, ExternalLink, Loader2, MoreVertical, Pause, Play, RefreshCw, Cpu, Box, Network, Database, Home } from "lucide-react";
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { formatRelative, getStatusColor } from "@/lib/utils";
@@ -66,9 +66,13 @@ export default function SitesPage() {
     nodeVersion: "20",
     pythonVersion: "3.12",
     dbStackVersion: "postgresql-16",
-    appProxyPort: 3000 as number,
+    /** Empty = auto-assign from 10000–19999 */
+    appProxyPort: "" as string,
     /** Staff: assign site to this panel user (customer tenant) */
     ownerId: "" as string,
+    networkGroup: "",
+    isCentralService: false,
+    defaultDocument: "",
   });
 
   const { data, isLoading } = useQuery({
@@ -82,6 +86,14 @@ export default function SitesPage() {
     staleTime: 60_000,
   });
   const catalog = catalogRes?.data;
+
+  const { data: networkGroupsRes } = useQuery({
+    queryKey: ["sites", "network-groups"],
+    queryFn: () => apiClient.get<{ data: string[] }>("/sites/network-groups"),
+    enabled: staff,
+    staleTime: 30_000,
+  });
+  const existingGroups = networkGroupsRes?.data ?? [];
 
   const { data: panelUsersRes } = useQuery({
     queryKey: ["auth", "users"],
@@ -100,33 +112,31 @@ export default function SitesPage() {
         type: payload.type,
         webServer: payload.webServer,
         dbStackVersion: payload.dbStackVersion,
+        networkGroup: payload.networkGroup.trim() || null,
+        isCentralService: payload.isCentralService,
       };
       if (staff && payload.ownerId) body.ownerId = payload.ownerId;
       if (payload.type === "php") body.phpVersion = payload.phpVersion;
-      if (payload.type === "nodejs") {
-        body.nodeVersion = payload.nodeVersion;
-        body.appProxyPort = payload.appProxyPort;
-      }
-      if (payload.type === "python") {
-        body.pythonVersion = payload.pythonVersion;
-        body.appProxyPort = payload.appProxyPort;
+      if (payload.type === "nodejs") body.nodeVersion = payload.nodeVersion;
+      if (payload.type === "python") body.pythonVersion = payload.pythonVersion;
+      // Only send appProxyPort if explicitly set; otherwise backend auto-assigns
+      const port = parseInt(payload.appProxyPort);
+      if (!isNaN(port) && port >= 1024) body.appProxyPort = port;
+      if (payload.type === "static" || payload.type === "php") {
+        const h = payload.defaultDocument.trim();
+        if (h) body.defaultDocument = h;
       }
       return apiClient.post("/sites", body);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["sites"] });
+      queryClient.invalidateQueries({ queryKey: ["sites", "network-groups"] });
       setShowCreate(false);
       setForm({
-        name: "",
-        domain: "",
-        type: "static",
-        webServer: "nginx",
-        phpVersion: "8.2",
-        nodeVersion: "20",
-        pythonVersion: "3.12",
-        dbStackVersion: "postgresql-16",
-        appProxyPort: 3000,
-        ownerId: "",
+        name: "", domain: "", type: "static", webServer: "nginx",
+        phpVersion: "8.2", nodeVersion: "20", pythonVersion: "3.12",
+        dbStackVersion: "postgresql-16", appProxyPort: "", ownerId: "",
+        networkGroup: "", isCentralService: false, defaultDocument: "",
       });
     },
   });
@@ -221,6 +231,8 @@ export default function SitesPage() {
                         type: t,
                         webServer:
                           (t === "php" || t === "static") && f.webServer === "traefik" ? "nginx" : f.webServer,
+                        defaultDocument:
+                          t === "static" || t === "php" ? f.defaultDocument : "",
                       }));
                     }}
                     className="flex h-9 w-full rounded-md border border-input bg-secondary/50 px-3 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
@@ -262,6 +274,24 @@ export default function SitesPage() {
 
               <SiteTypeHint type={form.type} />
 
+              {(form.type === "static" || form.type === "php") && (
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">
+                    Homepage file{" "}
+                    <span className="text-xs font-normal text-muted-foreground">(optional)</span>
+                  </label>
+                  <input
+                    value={form.defaultDocument}
+                    onChange={(e) => setForm({ ...form, defaultDocument: e.target.value })}
+                    placeholder="e.g. main.html — empty uses index.html"
+                    className="flex h-9 w-full rounded-md border border-input bg-secondary/50 px-3 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Use when your entry page is not named index.html (avoids nginx 403 on /).
+                  </p>
+                </div>
+              )}
+
               {staff && (
                 <div className="space-y-1.5">
                   <label className="text-sm font-medium">Assign to customer (optional)</label>
@@ -284,18 +314,24 @@ export default function SitesPage() {
                 </div>
               )}
 
-              {(form.type === "nodejs" || form.type === "python") && (
+              {(form.type === "nodejs" || form.type === "python" || form.type === "php") && (
                 <div className="space-y-1.5">
-                  <label className="text-sm font-medium">App listen port (reverse proxy target)</label>
+                  <label className="text-sm font-medium">
+                    App port{" "}
+                    <span className="text-xs font-normal text-muted-foreground">(blank = auto-assign)</span>
+                  </label>
                   <input
                     type="number"
                     min={1024}
                     max={65535}
                     value={form.appProxyPort}
-                    onChange={(e) => setForm({ ...form, appProxyPort: Number(e.target.value) || 3000 })}
+                    onChange={(e) => setForm({ ...form, appProxyPort: e.target.value })}
+                    placeholder="Auto (10000–19999)"
                     className="flex h-9 w-full rounded-md border border-input bg-secondary/50 px-3 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
                   />
-                  <p className="text-xs text-muted-foreground">Your process should bind to this port on localhost.</p>
+                  <p className="text-xs text-muted-foreground">
+                    A conflict-free port is auto-assigned if left blank. Your process must bind to this port.
+                  </p>
                 </div>
               )}
 
@@ -325,6 +361,77 @@ export default function SitesPage() {
                   ))}
                 </select>
                 <p className="text-xs text-muted-foreground">Used as a label for provisioning and documentation; does not migrate existing databases.</p>
+              </div>
+
+              {/* Modular networking */}
+              <div className="rounded-lg border border-border bg-secondary/10 p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Network className="w-4 h-4 text-primary" />
+                    <span className="text-sm font-medium">Modular networking</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setForm((f) => ({
+                        ...f,
+                        networkGroup: f.networkGroup ? "" : "default",
+                        isCentralService: f.networkGroup ? false : f.isCentralService,
+                      }))
+                    }
+                    className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                      form.networkGroup ? "bg-primary" : "bg-secondary border border-input"
+                    }`}
+                  >
+                    <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${
+                      form.networkGroup ? "translate-x-4" : "translate-x-0.5"
+                    }`} />
+                  </button>
+                </div>
+                {form.networkGroup && (
+                  <div className="space-y-3 pt-1">
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      Containers in the same group share a Docker bridge and can communicate.
+                      Different groups are fully isolated from each other.
+                    </p>
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium">Group name</label>
+                      <div className="flex gap-2">
+                        <input
+                          value={form.networkGroup}
+                          onChange={(e) => setForm({ ...form, networkGroup: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "") })}
+                          placeholder="e.g. my-saas"
+                          className="flex h-8 flex-1 rounded-md border border-input bg-secondary/50 px-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                        />
+                        {existingGroups.length > 0 && (
+                          <select
+                            value=""
+                            onChange={(e) => { if (e.target.value) setForm({ ...form, networkGroup: e.target.value }); }}
+                            className="h-8 rounded-md border border-input bg-secondary/50 px-2 text-xs text-muted-foreground"
+                          >
+                            <option value="">Existing…</option>
+                            {existingGroups.map((g) => <option key={g} value={g}>{g}</option>)}
+                          </select>
+                        )}
+                      </div>
+                    </div>
+                    <label className="flex items-start gap-2.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={form.isCentralService}
+                        onChange={(e) => setForm({ ...form, isCentralService: e.target.checked })}
+                        className="mt-0.5 accent-primary"
+                      />
+                      <span className="text-xs text-muted-foreground leading-relaxed">
+                        <span className="flex items-center gap-1 text-foreground font-medium text-sm">
+                          <Database className="w-3.5 h-3.5" /> Central service
+                        </span>
+                        This container (DB, cache, broker) connects to <em>all</em> group
+                        networks automatically — every module can reach it without extra config.
+                      </span>
+                    </label>
+                  </div>
+                )}
               </div>
 
               {/* Web server picker */}
@@ -443,6 +550,7 @@ function SiteCard({
   const [menuOpen, setMenuOpen] = useState(false);
   const [wsMenuOpen, setWsMenuOpen] = useState(false);
   const [stackOpen, setStackOpen] = useState(false);
+  const [homepageOpen, setHomepageOpen] = useState(false);
   const statusColor = getStatusColor(site.status);
   const dotColor = statusColor === "success" ? "bg-emerald-400" : statusColor === "warning" ? "bg-amber-400" : "bg-red-400";
   const ws = (site.webServer ?? "nginx") as WebServerType;
@@ -453,6 +561,25 @@ function SiteCard({
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["sites"] });
       setStackOpen(false);
+      setMenuOpen(false);
+    },
+  });
+
+  const homepageMutation = useMutation({
+    mutationFn: (payload: { defaultDocument: string | null }) =>
+      apiClient.patch(`/sites/${site.id}`, payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["sites"] });
+      setHomepageOpen(false);
+      setMenuOpen(false);
+    },
+  });
+
+  const homepageDetectMutation = useMutation({
+    mutationFn: () => apiClient.post(`/sites/${site.id}/homepage/detect`, {}),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["sites"] });
+      setHomepageOpen(false);
       setMenuOpen(false);
     },
   });
@@ -472,6 +599,18 @@ function SiteCard({
       setMenuOpen(false);
     },
   });
+
+  /** TanStack Query keeps mutation errors forever — clears stale banners on dismiss / closing menu */
+  function clearIsolationMutationErrors(): void {
+    deployIsolationMutation.reset();
+    removeIsolationMutation.reset();
+  }
+
+  useEffect(() => {
+    if (!menuOpen && !deployIsolationMutation.isPending && !removeIsolationMutation.isPending) {
+      clearIsolationMutationErrors();
+    }
+  }, [menuOpen]); // eslint-disable-line react-hooks/exhaustive-deps -- reset when menu hides
 
   return (
     <div className="rounded-xl border bg-card p-5 hover:border-border/80 transition-colors group">
@@ -494,6 +633,15 @@ function SiteCard({
               <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} />
               <div className="absolute right-0 top-full mt-1 w-44 z-20 rounded-lg border bg-popover shadow-lg py-1">
                 <a href={`/dashboard/editor?siteId=${site.id}`} className="flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent">Open Editor</a>
+                {(site.type === "static" || site.type === "php") && (
+                  <button
+                    type="button"
+                    onClick={() => { setHomepageOpen(true); setMenuOpen(false); }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left"
+                  >
+                    <Home className="w-3.5 h-3.5" /> Homepage file
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => { setStackOpen(true); setMenuOpen(false); }}
@@ -579,6 +727,11 @@ function SiteCard({
           {site.type === "nodejs" && site.nodeVersion ? ` Node ${site.nodeVersion}` : ""}
           {site.type === "python" && site.pythonVersion ? ` Py ${site.pythonVersion}` : ""}
         </span>
+        {(site.type === "static" || site.type === "php") && site.defaultDocument && (
+          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs border font-medium bg-sky-500/10 text-sky-300 border-sky-500/25" title="Custom homepage filename">
+            → {site.defaultDocument}
+          </span>
+        )}
         {site.dbStackVersion && (
           <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs border font-medium bg-muted text-muted-foreground" title="Preferred DB stack hint">
             DB {site.dbStackVersion}
@@ -608,13 +761,35 @@ function SiteCard({
       </div>
 
       {(deployIsolationMutation.isError || removeIsolationMutation.isError) && (
-        <p className="text-xs text-destructive mt-2">
-          {(deployIsolationMutation.error as Error)?.message ?? (removeIsolationMutation.error as Error)?.message}
-        </p>
+        <div className="flex items-start gap-2 mt-2">
+          <p className="text-xs text-destructive flex-1 min-w-0">
+            {(deployIsolationMutation.error as Error)?.message ??
+              (removeIsolationMutation.error as Error)?.message}
+          </p>
+          <button
+            type="button"
+            onClick={() => clearIsolationMutationErrors()}
+            className="text-[11px] text-muted-foreground hover:text-foreground shrink-0 underline underline-offset-2"
+          >
+            Dismiss
+          </button>
+        </div>
       )}
 
       <p className="text-xs text-muted-foreground mt-3">Created {formatRelative(site.createdAt)}</p>
 
+      {homepageOpen && (site.type === "static" || site.type === "php") && (
+        <HomepageFileDialog
+          site={site}
+          onClose={() => setHomepageOpen(false)}
+          isSaving={homepageMutation.isPending}
+          isDetecting={homepageDetectMutation.isPending}
+          saveError={homepageMutation.error as Error | null}
+          detectError={homepageDetectMutation.error as Error | null}
+          onSave={(defaultDocument) => homepageMutation.mutate({ defaultDocument })}
+          onDetect={() => homepageDetectMutation.mutate()}
+        />
+      )}
       {stackOpen && (
         <SiteStackDialog
           site={site}
@@ -625,6 +800,88 @@ function SiteCard({
           onSave={(body) => stackMutation.mutate(body)}
         />
       )}
+    </div>
+  );
+}
+
+function HomepageFileDialog({
+  site,
+  onClose,
+  onSave,
+  onDetect,
+  isSaving,
+  isDetecting,
+  saveError,
+  detectError,
+}: {
+  site: Site;
+  onClose: () => void;
+  onSave: (defaultDocument: string | null) => void;
+  onDetect: () => void;
+  isSaving: boolean;
+  isDetecting: boolean;
+  saveError: Error | null;
+  detectError: Error | null;
+}) {
+  const [filename, setFilename] = useState(current);
+
+  useEffect(() => {
+    setFilename(site.defaultDocument ?? "");
+  }, [site.defaultDocument]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative z-10 w-full max-w-md glass rounded-2xl p-6 shadow-2xl">
+        <h3 className="text-lg font-semibold mb-1">Public homepage</h3>
+        <p className="text-sm text-muted-foreground mb-4">
+          Which file should visitors see at <span className="text-foreground font-mono text-xs">/</span>? Leave empty to use normal{' '}
+          <span className="font-mono text-xs">index.html</span> / <span className="font-mono text-xs">index.htm</span>
+          {site.type === "php" ? " / index.php" : ""}.
+        </p>
+        <label className="text-xs font-medium text-muted-foreground">Filename in site root</label>
+        <input
+          value={filename}
+          onChange={(e) => setFilename(e.target.value)}
+          placeholder="main.html"
+          className="mt-1 flex h-9 w-full rounded-md border border-input bg-secondary/50 px-3 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-ring"
+        />
+        <div className="flex flex-wrap gap-2 mt-4">
+          <button
+            type="button"
+            onClick={() => onDetect()}
+            disabled={isDetecting || isSaving}
+            className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md border border-input text-xs font-medium hover:bg-accent disabled:opacity-50"
+          >
+            {isDetecting ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
+            Auto-detect from files
+          </button>
+          <button
+            type="button"
+            onClick={() => setFilename("")}
+            className="px-3 py-1.5 rounded-md border border-input text-xs text-muted-foreground hover:bg-accent"
+          >
+            Clear (use defaults)
+          </button>
+        </div>
+        {(saveError || detectError) && (
+          <p className="text-sm text-destructive mt-3">{(saveError ?? detectError)?.message}</p>
+        )}
+        <div className="flex gap-2 mt-6">
+          <button type="button" onClick={onClose} className="flex-1 h-9 rounded-md border border-input text-sm hover:bg-accent">
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={isSaving || isDetecting}
+            onClick={() => onSave(filename.trim() === "" ? null : filename.trim())}
+            className="flex-1 h-9 bg-primary text-primary-foreground rounded-md text-sm font-medium hover:bg-primary/90 disabled:opacity-50 flex items-center justify-center gap-2"
+          >
+            {isSaving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+            Save &amp; reload server
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
