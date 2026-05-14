@@ -8,7 +8,7 @@
     "build": "sh -c 'tsc -p tsconfig.build.json --pretty false || test -f dist/index.js'",
     "start": "node --import tsx dist/index.js",
     "typecheck": "tsc --noEmit",
-    "test:files": "tsx --test src/modules/sites/files.guard.test.ts",
+    "test:files": "tsx --test src/modules/sites/files.guard.test.ts src/middleware/waf.test.ts",
     "db:generate": "cd ../../packages/db && npm run db:generate",
     "db:migrate": "cd ../../packages/db && npm run db:migrate",
     "db:seed": "cd ../../packages/db && npm run db:seed"

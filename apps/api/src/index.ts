@@ -51,11 +51,17 @@ const app = Fastify({
     level: process.env.LOG_LEVEL ?? "info",
   },
   trustProxy: true,
+  bodyLimit: (() => {
+    const n = Number(process.env.HOSTPANEL_API_BODY_LIMIT_BYTES);
+    return Number.isFinite(n) && n > 0 ? n : 2 * 1024 * 1024;
+  })(),
 });
 
 app.addHook("onRequest", async (request, reply) => {
   applyHttpSecurityHeaders(request, reply);
 });
+
+app.addHook("onRequest", ipBlockMiddleware);
 
 // Preserve raw JSON bytes for HMAC verification (e.g. GitHub webhooks).
 app.removeContentTypeParser("application/json");
@@ -122,15 +128,17 @@ await app.register(jwt, {
 });
 
 const useRedisRateLimit = Boolean(process.env.REDIS_URL?.trim());
+// Per-route limits (e.g. login) stack with this baseline. With Redis: fail closed if the store errors (no silent bypass).
+const globalRps = Number(process.env.HOSTPANEL_GLOBAL_RATE_LIMIT_MAX ?? 200);
 await app.register(rateLimit, {
   global: true,
-  max: 200,
+  max: Number.isFinite(globalRps) && globalRps > 0 ? globalRps : 200,
   timeWindow: "1 minute",
   ...(useRedisRateLimit
     ? {
         redis: getRedis(),
         nameSpace: "hostpanel-rl-",
-        skipOnError: true,
+        skipOnError: false,
       }
     : { redis: undefined }),
 });
@@ -147,9 +155,10 @@ await app.register(staticFiles, {
 });
 
 // ─── Global middleware ────────────────────────────────────────────────────────
+// Input validation: each route uses explicit Zod (or multipart) schemas — no catch-all JSON schema.
+// WAF + rate limits are defense-in-depth on top of Prisma parameterization.
 
-app.addHook("onRequest", ipBlockMiddleware);
-app.addHook("onRequest", wafMiddleware);
+app.addHook("preHandler", wafMiddleware);
 app.addHook("onResponse", auditMiddleware);
 
 // ─── Health check ─────────────────────────────────────────────────────────────

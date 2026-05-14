@@ -119,12 +119,17 @@ export function isSqlEditorReadOnly(): boolean {
 }
 
 /**
- * Baseline HTTP security response headers (aligned with common `@fastify/helmet` defaults; no CSP, suitable for JSON APIs).
+ * Baseline HTTP security response headers. JSON-only API: tight CSP prevents stray execution if a response
+ * is ever mislabeled as HTML; frame-ancestors hardens clickjacking for any HTML error pages.
  * HSTS when `NODE_ENV=production` and the request is HTTPS (`x-forwarded-proto`, `request.protocol`, or `HOSTPANEL_HSTS=true`).
  */
 export function applyHttpSecurityHeaders(request: FastifyRequest, reply: FastifyReply): void {
   reply.header("X-Content-Type-Options", "nosniff");
   reply.header("X-Frame-Options", "SAMEORIGIN");
+  reply.header(
+    "Content-Security-Policy",
+    "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+  );
   reply.header("Referrer-Policy", "strict-origin-when-cross-origin");
   reply.header("X-DNS-Prefetch-Control", "off");
   reply.header("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
