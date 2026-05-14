@@ -255,6 +255,8 @@ See [SECURITY.md](SECURITY.md) for secrets handling, webhooks, and hardening ove
 - Redis 7 running locally
 - *(Optional)* Docker, if you want to test container features
 
+**Note:** If your shell sets `NODE_ENV=production`, `npm install` / `npm ci` will **omit devDependencies** (ESLint, Prisma tooling, TypeScript, etc.). For local setup use `unset NODE_ENV` or `NODE_ENV=development npm install`, or run `npm ci --include=dev`.
+
 ### Steps
 
 ```bash

@@ -823,7 +823,7 @@ function HomepageFileDialog({
   saveError: Error | null;
   detectError: Error | null;
 }) {
-  const [filename, setFilename] = useState(current);
+  const [filename, setFilename] = useState(site.defaultDocument ?? "");
 
   useEffect(() => {
     setFilename(site.defaultDocument ?? "");

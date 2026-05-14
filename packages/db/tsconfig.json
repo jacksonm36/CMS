@@ -3,7 +3,7 @@
   "compilerOptions": {
     "outDir": "./dist",
     "moduleResolution": "node16",
-    "module": "CommonJS"
+    "module": "Node16"
   },
   "include": ["src", "prisma"]
 }

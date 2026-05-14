@@ -10,8 +10,8 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# NODE_ENV must not be "production" during npm ci — npm omits devDependencies (eslint, prisma CLI support, etc.)
 env:
-  NODE_ENV: production
   JWT_SECRET: ci-build-jwt-secret-min-32-chars-minimum-length-ok
   JWT_REFRESH_SECRET: ci-build-jwt-refresh-secret-min-32-characters-zz
   SESSION_SECRET: ci-build-session-secret-min-32-chars-min-length-aa
@@ -57,3 +57,5 @@ jobs:
 
       - name: Build
         run: npm run build
+        env:
+          NODE_ENV: production
