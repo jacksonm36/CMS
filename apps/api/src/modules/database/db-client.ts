@@ -1,5 +1,24 @@
 import { Client as PgClient } from "pg";
 
+/** Matches HostPanel `getDbConnections()` ids: `default` or `conn_N` (N ≥ 1). */
+const PANEL_DB_CONN_ID_RE = /^(?:default|conn_[1-9][0-9]*)$/;
+
+/** Postgres identifier for CREATE / unqualified table browse (no quoting tricks). */
+export const PANEL_PG_IDENTIFIER_RE = /^[a-zA-Z][a-zA-Z0-9_]{0,62}$/;
+
+function assertPanelConnectionId(connectionId: string | undefined): void {
+  if (connectionId == null || connectionId === "") return;
+  if (!PANEL_DB_CONN_ID_RE.test(connectionId)) {
+    throw new Error("Invalid connection id");
+  }
+}
+
+function assertPgIdentifier(label: string, name: string): void {
+  if (!PANEL_PG_IDENTIFIER_RE.test(name)) {
+    throw new Error(`Invalid ${label}`);
+  }
+}
+
 export interface DbConnection {
   id: string;
   name: string;
@@ -80,6 +99,7 @@ function parsePgConnectionString(url: string) {
 }
 
 function getConnectionUrl(connectionId?: string): string {
+  assertPanelConnectionId(connectionId);
   if (!connectionId || connectionId === "default") {
     return process.env.DATABASE_URL ?? "postgresql://localhost:5432/postgres";
   }
@@ -127,8 +147,10 @@ export async function listDatabasesPostgres(connectionId?: string): Promise<{ na
 }
 
 export async function listTablesPg(dbName: string, connectionId?: string): Promise<TableInfo[]> {
+  assertPgIdentifier("database name", dbName);
   return withPgClient(connectionId, async (client) => {
-    const result = await client.query(`
+    const result = await client.query(
+      `
       SELECT
         t.table_name AS name,
         t.table_schema AS schema,
@@ -137,10 +159,13 @@ export async function listTablesPg(dbName: string, connectionId?: string): Promi
         pg_total_relation_size('"' || t.table_schema || '"."' || t.table_name || '"') AS size_bytes
       FROM information_schema.tables t
       LEFT JOIN pg_stat_user_tables s ON s.relname = t.table_name AND s.schemaname = t.table_schema
-      WHERE t.table_schema NOT IN ('pg_catalog', 'information_schema')
+      WHERE lower(t.table_catalog) = lower($1)
+        AND t.table_schema NOT IN ('pg_catalog', 'information_schema')
         AND t.table_type = 'BASE TABLE'
       ORDER BY t.table_schema, t.table_name
-    `);
+    `,
+      [dbName],
+    );
     return result.rows.map((r) => ({
       name: r.name,
       schema: r.schema,
@@ -158,11 +183,14 @@ export async function getTableRowsPg(
   offset: number,
   connectionId?: string
 ): Promise<{ rows: Record<string, unknown>[]; columns: string[]; total: number }> {
+  assertPgIdentifier("table name", tableName);
+  const safeLimit = Math.min(500, Math.max(0, Math.floor(Number(limit)) || 0));
+  const safeOffset = Math.max(0, Math.floor(Number(offset)) || 0);
+  const quotedTable = `"${tableName}"`;
   return withPgClient(connectionId, async (client) => {
-    const safe = tableName.replace(/[^a-zA-Z0-9_."]/g, "");
     const [dataResult, countResult] = await Promise.all([
-      client.query(`SELECT * FROM ${safe} LIMIT $1 OFFSET $2`, [limit, offset]),
-      client.query(`SELECT COUNT(*) AS total FROM ${safe}`),
+      client.query(`SELECT * FROM ${quotedTable} LIMIT $1 OFFSET $2`, [safeLimit, safeOffset]),
+      client.query(`SELECT COUNT(*) AS total FROM ${quotedTable}`),
     ]);
     return {
       rows: dataResult.rows,
@@ -226,6 +254,7 @@ export async function getDbStatsPg(connectionId?: string): Promise<{
 
 export async function createDatabase(name: string, engine: string, connectionId?: string): Promise<void> {
   if (engine === "postgresql") {
+    assertPgIdentifier("database name", name);
     await withPgClient(connectionId, async (client) => {
       await client.query(`CREATE DATABASE "${name}"`);
     });
@@ -234,6 +263,7 @@ export async function createDatabase(name: string, engine: string, connectionId?
 
 export async function dropDatabase(name: string, engine: string, connectionId?: string): Promise<void> {
   if (engine === "postgresql") {
+    assertPgIdentifier("database name", name);
     await withPgClient(connectionId, async (client) => {
       // Terminate active connections first
       await client.query(`
@@ -248,8 +278,14 @@ export async function dropDatabase(name: string, engine: string, connectionId?: 
 
 // ─── MySQL stub ───────────────────────────────────────────────────────────────
 
+/**
+ * Placeholder until MySQL is wired — **must** use parameterized execution only, e.g.
+ * `pool.execute("SELECT * FROM t WHERE id = ?", [id])` — never concatenate user input into SQL text.
+ */
 export async function queryMysql(_sql: string, _connectionId?: string): Promise<QueryResult> {
-  throw new Error("MySQL support requires the 'mysql2' package. Add it to apps/api/package.json.");
+  throw new Error(
+    "MySQL support is not enabled. When implemented, use mysql2 (or equivalent) with bound parameters only — never string-concatenate untrusted input into SQL.",
+  );
 }
 
 export async function listTablesMysql(_dbName: string, _connectionId?: string): Promise<TableInfo[]> {

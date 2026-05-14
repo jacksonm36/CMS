@@ -11,6 +11,18 @@ function resolveApiBase(): string {
 
 const API_BASE = resolveApiBase();
 
+/** Thrown on non-2xx API responses; `code` is set when the JSON body includes it (e.g. SQL editor step-up). */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public status: number,
+    public code?: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 class ApiClient {
   private baseUrl: string;
 
@@ -26,10 +38,10 @@ class ApiClient {
   private async request<T>(
     method: string,
     path: string,
-    options: { body?: unknown; token?: string | null } = {}
+    options: { body?: unknown; token?: string | null; headers?: Record<string, string> } = {},
   ): Promise<T> {
     const token = options.token !== undefined ? options.token : this.getToken();
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = { ...options.headers };
     if (token) headers.Authorization = `Bearer ${token}`;
     // Do not send Content-Type: application/json without a body — Fastify rejects
     // empty JSON bodies with 400 (breaks DELETE /api/sites/:id/isolation, etc.).
@@ -67,7 +79,9 @@ class ApiClient {
         (parsed && typeof parsed.error === "string" && parsed.error) ||
         (parsed && typeof parsed.message === "string" && parsed.message) ||
         (res.statusText ? `${res.statusText} (${res.status})`.trim() : `HTTP ${res.status}`);
-      throw new Error(msg);
+      const code =
+        parsed && typeof parsed.code === "string" ? parsed.code : undefined;
+      throw new ApiError(msg, res.status, code);
     }
 
     if (parsed === undefined) throw new Error("Invalid JSON response from API");
@@ -78,8 +92,8 @@ class ApiClient {
     return this.request<T>("GET", path, { token: tokenOverride });
   }
 
-  post<T>(path: string, body?: unknown) {
-    return this.request<T>("POST", path, { body });
+  post<T>(path: string, body?: unknown, opts?: { headers?: Record<string, string> }) {
+    return this.request<T>("POST", path, { body, ...opts });
   }
 
   put<T>(path: string, body?: unknown) {

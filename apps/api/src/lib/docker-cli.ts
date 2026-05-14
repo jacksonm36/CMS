@@ -492,3 +492,24 @@ export function parseResizeFrame(raw: Buffer | string): { cols: number; rows: nu
     return null;
   }
 }
+
+/** Normalize ws `message` payloads (Buffer / ArrayBuffer / typed array / string) for PTY handlers. */
+export function wsRawToBuffer(raw: unknown): Buffer {
+  if (Buffer.isBuffer(raw)) return raw;
+  if (raw instanceof ArrayBuffer) return Buffer.from(raw);
+  if (ArrayBuffer.isView(raw)) {
+    const v = raw as ArrayBufferView;
+    return Buffer.from(v.buffer, v.byteOffset, v.byteLength);
+  }
+  if (typeof raw === "string") return Buffer.from(raw, "utf8");
+  return Buffer.from(String(raw), "utf8");
+}
+
+export function decodeTerminalWsMessage(
+  raw: unknown,
+): { kind: "resize"; cols: number; rows: number } | { kind: "stdin"; data: string } {
+  const buf = wsRawToBuffer(raw);
+  const resize = parseResizeFrame(buf);
+  if (resize) return { kind: "resize", cols: resize.cols, rows: resize.rows };
+  return { kind: "stdin", data: buf.toString("utf8") };
+}

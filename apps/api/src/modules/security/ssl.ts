@@ -3,18 +3,25 @@ import { writeFile, readFile, mkdir, access } from "fs/promises";
 import { join } from "path";
 import { prisma } from "@hostpanel/db";
 import { execFile } from "child_process";
+import type { ExecFileOptions } from "child_process";
 import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);
+
+/** `execFile` supports stdin `input` at runtime; typings omit it on some overloads (Node 22+ @types/node). */
+function execOpenssl(args: readonly string[], stdinPem: string): Promise<{ stdout: string; stderr: string }> {
+  return execFileAsync("openssl", args, {
+    input: stdinPem,
+    encoding: "utf8",
+  } as ExecFileOptions & { input: string }) as Promise<{ stdout: string; stderr: string }>;
+}
 const CERTS_DIR = process.env.CERTS_DIR ?? "./certs";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 async function parseCertExpiry(certPem: string): Promise<Date | null> {
   try {
-    const { stdout } = await execFileAsync("openssl", [
-      "x509", "-noout", "-enddate",
-    ], { input: certPem } as unknown as { input: string });
+    const { stdout } = await execOpenssl(["x509", "-noout", "-enddate"], certPem);
     const match = stdout.match(/notAfter=(.*)/);
     if (match?.[1]) return new Date(match[1]);
   } catch {}
@@ -24,9 +31,7 @@ async function parseCertExpiry(certPem: string): Promise<Date | null> {
 
 async function parseCertSANs(certPem: string): Promise<string[]> {
   try {
-    const { stdout } = await execFileAsync("openssl", [
-      "x509", "-noout", "-ext", "subjectAltName",
-    ], { input: certPem } as unknown as { input: string });
+    const { stdout } = await execOpenssl(["x509", "-noout", "-ext", "subjectAltName"], certPem);
     return (stdout.match(/DNS:([^,\s]+)/g) ?? []).map((s) => s.replace("DNS:", ""));
   } catch {}
   return [];
@@ -137,12 +142,8 @@ export async function importCertificate(params: ManualCertImport): Promise<strin
 
   // Validate cert/key pair match via openssl
   try {
-    const certModulus = await execFileAsync("openssl", ["x509", "-noout", "-modulus"], {
-      input: certPem,
-    } as unknown as { input: string });
-    const keyModulus = await execFileAsync("openssl", ["rsa", "-noout", "-modulus"], {
-      input: keyPem,
-    } as unknown as { input: string });
+    const certModulus = await execOpenssl(["x509", "-noout", "-modulus"], certPem);
+    const keyModulus = await execOpenssl(["rsa", "-noout", "-modulus"], keyPem);
 
     if (certModulus.stdout.trim() !== keyModulus.stdout.trim()) {
       throw new Error("Certificate and private key do not match");
@@ -213,9 +214,10 @@ export async function readCertDetails(certPath: string): Promise<{
 }> {
   try {
     const pem = await readFile(certPath, "utf-8");
-    const { stdout } = await execFileAsync("openssl", [
-      "x509", "-noout", "-subject", "-issuer", "-dates", "-serial",
-    ], { input: pem } as unknown as { input: string });
+    const { stdout } = await execOpenssl(
+      ["x509", "-noout", "-subject", "-issuer", "-dates", "-serial"],
+      pem,
+    );
 
     const get = (key: string) => stdout.match(new RegExp(`${key}=([^\n]+)`))?.[1]?.trim() ?? "";
 

@@ -242,13 +242,33 @@ export async function redisRoutes(app: FastifyInstance) {
 
   // ─── Run raw command ──────────────────────────────────────────────────────
 
-  app.post("/command", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
+  app.post("/command", { preHandler: requireRole("superadmin") }, async (request, reply) => {
     const body = z.object({ command: z.string().min(1) }).safeParse(request.body);
     if (!body.success) return reply.status(400).send({ success: false, error: "Command required" });
 
-    const BLOCKED = ["config set", "config rewrite", "debug", "shutdown", "slaveof", "replicaof", "cluster"];
+    const BLOCKED_PREFIXES = [
+      "config set",
+      "config rewrite",
+      "config resetstat",
+      "debug",
+      "shutdown",
+      "slaveof",
+      "replicaof",
+      "cluster",
+      "flushall",
+      "flushdb",
+      "eval ",
+      "evalsha",
+      "script ",
+      "module ",
+      "acl ",
+      "migrate ",
+      "client kill",
+      "psync",
+      "sync",
+    ];
     const lower = body.data.command.toLowerCase().trim();
-    if (BLOCKED.some((b) => lower.startsWith(b))) {
+    if (BLOCKED_PREFIXES.some((b) => lower.startsWith(b))) {
       return reply.status(403).send({ success: false, error: "This command is blocked for safety" });
     }
 

@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_ENV: production
+  JWT_SECRET: ci-build-jwt-secret-min-32-chars-minimum-length-ok
+  JWT_REFRESH_SECRET: ci-build-jwt-refresh-secret-min-32-characters-zz
+  SESSION_SECRET: ci-build-session-secret-min-32-chars-min-length-aa
+  NEXTAUTH_SECRET: ci-build-nextauth-secret-min-32-chars-length-bb
+  NEXTAUTH_URL: http://localhost:3000
+  INTERNAL_API_URL: http://127.0.0.1:4000
+  NEXT_PUBLIC_API_PORT: "4000"
+  CORS_ORIGIN: http://localhost:3000
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit (critical — must be clean)
+        run: npm audit --audit-level=critical --omit=dev
+
+      - name: Audit report (high — informational, transitive)
+        run: npm audit --audit-level=high --omit=dev
+        continue-on-error: true
+
+      - name: Generate Prisma client
+        run: npm run db:generate
+
+      - name: Lint
+        run: npm run lint --if-present
+
+      - name: Typecheck
+        run: npm run typecheck --if-present
+
+      - name: Build
+        run: npm run build

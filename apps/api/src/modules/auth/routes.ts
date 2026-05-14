@@ -1,12 +1,22 @@
 import type { FastifyInstance } from "fastify";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import bcrypt from "bcryptjs";
 import { authenticator } from "otplib";
+import { randomUUID } from "node:crypto";
+import {
+  generateAuthenticationOptions,
+  verifyAuthenticationResponse,
+  type VerifyAuthenticationResponseOpts,
+} from "@simplewebauthn/server";
 import qrcode from "qrcode";
 import { prisma } from "@hostpanel/db";
-import { recordFailedLogin, clearFailedLogins } from "../../middleware/ipBlock.js";
-import { requireAuth, requireRole } from "../../lib/auth.js";
+import type { Role } from "@hostpanel/types";
+import { recordFailedLogin, clearFailedLogins, isLoginIdentifierThrottled, recordLoginIdentifierFailure, clearLoginIdentifierAttempts } from "../../middleware/ipBlock.js";
+import { getRedis } from "../../lib/redis.js";
+import { requireAuth, requireRole, signSqlEditorElevationToken } from "../../lib/auth.js";
 import { HP_TOKEN_COOKIE } from "../../lib/ws-auth.js";
+import { getRpConfig } from "./passkey.js";
 
 /** Accepts email addresses including single-label hosts like admin@localhost */
 function isValidLoginEmail(val: string) {
@@ -62,6 +72,24 @@ const adminUpdateUserSchema = z.object({
 
 const verifyTotpSchema = z.object({ code: z.string().length(6) });
 
+/** Single client-visible message for any failed credential check (avoid account/oracle leaks). */
+const AUTH_FAILURE_MESSAGE = "Invalid credentials";
+
+let dummyBcryptHashPromise: Promise<string> | null = null;
+
+/** Bcrypt compare; uses an internal dummy hash when `passwordHash` is absent so missing-user timing matches failed-password. */
+async function bcryptCompareOrDummy(
+  plain: string,
+  passwordHash: string | null | undefined,
+): Promise<boolean> {
+  if (!dummyBcryptHashPromise) {
+    dummyBcryptHashPromise = bcrypt.hash("hostpanel-login-timing-mitigation-v1", 12);
+  }
+  const d = await dummyBcryptHashPromise;
+  const use = passwordHash && passwordHash.length > 0 ? passwordHash : d;
+  return bcrypt.compare(plain, use);
+}
+
 export async function authRoutes(app: FastifyInstance) {
   // POST /api/auth/login — stricter per-route budget (credential stuffing)
   app.post(
@@ -69,8 +97,15 @@ export async function authRoutes(app: FastifyInstance) {
     {
       config: {
         rateLimit: {
-          max: 25,
+          max: 15,
           timeWindow: "1 minute",
+          keyGenerator: (request) => {
+            const b = request.body as { login?: unknown };
+            const raw = typeof b?.login === "string" ? b.login.trim().toLowerCase() : "";
+            if (!raw) return request.ip;
+            const id = createHash("sha256").update(raw).digest("hex").slice(0, 24);
+            return `${request.ip}:l:${id}`;
+          },
         },
       },
     },
@@ -83,6 +118,11 @@ export async function authRoutes(app: FastifyInstance) {
 
     const { login, password, totpCode } = body.data;
 
+    if (await isLoginIdentifierThrottled(login)) {
+      await bcryptCompareOrDummy(password, null);
+      return reply.status(401).send({ success: false, error: AUTH_FAILURE_MESSAGE });
+    }
+
     // Find by email first, then fall back to name (username)
     const isEmail = isValidLoginEmail(login);
     const user = isEmail
@@ -91,13 +131,15 @@ export async function authRoutes(app: FastifyInstance) {
 
     if (!user || !user.passwordHash) {
       await recordFailedLogin(request.ip);
-      return reply.status(401).send({ success: false, error: "Invalid credentials" });
+      await bcryptCompareOrDummy(password, null);
+      return reply.status(401).send({ success: false, error: AUTH_FAILURE_MESSAGE });
     }
 
-    const valid = await bcrypt.compare(password, user.passwordHash);
+    const valid = await bcryptCompareOrDummy(password, user.passwordHash);
     if (!valid) {
       await recordFailedLogin(request.ip);
-      return reply.status(401).send({ success: false, error: "Invalid credentials" });
+      await recordLoginIdentifierFailure(login);
+      return reply.status(401).send({ success: false, error: AUTH_FAILURE_MESSAGE });
     }
 
     if (user.twoFactorEnabled && user.totpSecret) {
@@ -107,11 +149,13 @@ export async function authRoutes(app: FastifyInstance) {
       const isValid = authenticator.verify({ token: totpCode, secret: user.totpSecret });
       if (!isValid) {
         await recordFailedLogin(request.ip);
-        return reply.status(401).send({ success: false, error: "Invalid 2FA code" });
+        await recordLoginIdentifierFailure(login);
+        return reply.status(401).send({ success: false, error: AUTH_FAILURE_MESSAGE });
       }
     }
 
     await clearFailedLogins(request.ip);
+    await clearLoginIdentifierAttempts(login);
 
     const token = app.jwt.sign({
       sub: user.id,
@@ -145,7 +189,7 @@ export async function authRoutes(app: FastifyInstance) {
   });
 
   // POST /api/auth/register — first user bootstrap only unless ALLOW_PUBLIC_REGISTRATION=true (prod)
-  app.post("/register", async (request, reply) => {
+  app.post("/register", { config: { rateLimit: { max: 8, timeWindow: "1 hour" } } }, async (request, reply) => {
     const body = registerSchema.safeParse(request.body);
     if (!body.success) return reply.status(400).send({ success: false, error: body.error.message });
 
@@ -253,7 +297,22 @@ export async function authRoutes(app: FastifyInstance) {
   });
 
   // POST /api/auth/change-password
-  app.post("/change-password", { preHandler: requireAuth }, async (request, reply) => {
+  app.post(
+    "/change-password",
+    {
+      preHandler: requireAuth,
+      config: {
+        rateLimit: {
+          max: 10,
+          timeWindow: "15 minutes",
+          keyGenerator: (request) => {
+            const u = request.user as { sub?: string } | undefined;
+            return u?.sub ? `pwdchange:${u.sub}` : request.ip;
+          },
+        },
+      },
+    },
+    async (request, reply) => {
     const body = changePasswordSchema.safeParse(request.body);
     if (!body.success) return reply.status(400).send({ success: false, error: body.error.message });
 
@@ -262,7 +321,7 @@ export async function authRoutes(app: FastifyInstance) {
     if (!user?.passwordHash) return reply.status(400).send({ success: false, error: "No password set" });
 
     const valid = await bcrypt.compare(body.data.currentPassword, user.passwordHash);
-    if (!valid) return reply.status(401).send({ success: false, error: "Current password incorrect" });
+    if (!valid) return reply.status(401).send({ success: false, error: "Password change failed" });
 
     const newHash = await bcrypt.hash(body.data.newPassword, 12);
     await prisma.user.update({ where: { id: sub }, data: { passwordHash: newHash } });
@@ -378,4 +437,167 @@ export async function authRoutes(app: FastifyInstance) {
     await prisma.user.delete({ where: { id } });
     return reply.send({ success: true, message: "User deleted" });
   });
+
+  // ─── SQL editor step-up (superadmin): short-lived JWT for X-SQL-Editor-Elevation ─────────────────
+
+  app.get(
+    "/sql-editor/passkey/options",
+    { preHandler: requireRole("superadmin") },
+    async (request, reply) => {
+      const redis = getRedis();
+      const { sub } = request.user as { sub: string };
+      const creds = await prisma.webAuthnCredential.findMany({
+        where: { userId: sub },
+        select: { credentialId: true, transports: true },
+      });
+      if (creds.length === 0) {
+        return reply.status(400).send({
+          success: false,
+          error: "Register a passkey under Settings → Security before using passkey confirmation.",
+        });
+      }
+      const { rpID } = getRpConfig(request.headers.origin as string | undefined);
+      const options = await generateAuthenticationOptions({
+        rpID,
+        userVerification: "preferred",
+        allowCredentials: creds.map((c) => ({
+          id: c.credentialId,
+          transports: c.transports as never[],
+        })),
+      });
+      const challengeId = randomUUID();
+      await redis.set(
+        `webauthn:sqleditor:${challengeId}`,
+        JSON.stringify({ challenge: options.challenge, rpID, sub }),
+        "EX",
+        300,
+      );
+      return reply.send({ success: true, data: { ...options, challengeId } });
+    },
+  );
+
+  app.post(
+    "/sql-editor/elevate",
+    {
+      preHandler: requireRole("superadmin"),
+      config: { rateLimit: { max: 15, timeWindow: "1 minute" } },
+    },
+    async (request, reply) => {
+      const { sub } = request.user as { sub: string };
+      const user = await prisma.user.findUnique({
+        where: { id: sub },
+        select: {
+          twoFactorEnabled: true,
+          totpSecret: true,
+          _count: { select: { webAuthnCredentials: true } },
+        },
+      });
+      if (!user) return reply.status(401).send({ success: false, error: "Unauthorized" });
+
+      const hasTotp = Boolean(user.twoFactorEnabled && user.totpSecret);
+      const hasPk = user._count.webAuthnCredentials > 0;
+      if (!hasTotp && !hasPk) {
+        return reply.status(403).send({
+          success: false,
+          error: "Enable two-factor authentication or register a passkey (Settings → Security) to use the SQL editor.",
+        });
+      }
+
+      const body = request.body as Record<string, unknown>;
+      const totpCode = typeof body.totpCode === "string" ? body.totpCode.trim() : "";
+
+      if (totpCode.length > 0) {
+        if (!hasTotp) {
+          return reply.status(400).send({ success: false, error: "Two-factor authentication is not enabled for this account." });
+        }
+        if (!authenticator.verify({ token: totpCode, secret: user.totpSecret! })) {
+          await recordFailedLogin(request.ip);
+          return reply.status(401).send({ success: false, error: "Confirmation failed" });
+        }
+      } else {
+        const challengeId = typeof body.challengeId === "string" ? body.challengeId : "";
+        if (!challengeId || !hasPk) {
+          return reply.status(400).send({
+            success: false,
+            error: hasTotp
+              ? "Send { totpCode: \"123456\" } or passkey assertion with challengeId from GET /api/auth/sql-editor/passkey/options."
+              : "Send passkey assertion with challengeId from GET /api/auth/sql-editor/passkey/options.",
+          });
+        }
+
+        const redis = getRedis();
+        const stored = await redis.get(`webauthn:sqleditor:${challengeId}`);
+        if (!stored) {
+          return reply.status(400).send({ success: false, error: "Challenge expired. Request new passkey options." });
+        }
+        const { challenge, rpID: storedRpID, sub: storedSub } = JSON.parse(stored) as {
+          challenge: string;
+          rpID: string;
+          sub: string;
+        };
+        if (storedSub !== sub) {
+          return reply.status(403).send({ success: false, error: "Challenge mismatch" });
+        }
+
+        const { rpID, allowedOrigins } = getRpConfig(request.headers.origin as string | undefined);
+        if (rpID !== storedRpID) {
+          return reply.status(400).send({ success: false, error: "RP ID mismatch" });
+        }
+
+        const credentialId = body.id as string;
+        const cred = await prisma.webAuthnCredential.findUnique({
+          where: { credentialId },
+          include: { user: true },
+        });
+        if (!cred || cred.userId !== sub) {
+          return reply.status(401).send({ success: false, error: "Passkey not recognised for this account" });
+        }
+
+        const { challengeId: _c, ...authResponse } = body as { challengeId?: string } & Record<string, unknown>;
+        let verification;
+        try {
+          const opts: VerifyAuthenticationResponseOpts = {
+            response: authResponse as never,
+            expectedChallenge: challenge,
+            expectedOrigin: allowedOrigins,
+            expectedRPID: storedRpID,
+            requireUserVerification: false,
+            credential: {
+              id: cred.credentialId,
+              publicKey: new Uint8Array(cred.publicKey),
+              counter: Number(cred.counter),
+              transports: cred.transports as never[],
+            },
+          };
+          verification = await verifyAuthenticationResponse(opts);
+        } catch {
+          return reply.status(401).send({ success: false, error: "Confirmation failed" });
+        }
+
+        if (!verification.verified) {
+          return reply.status(401).send({ success: false, error: "Passkey verification failed" });
+        }
+
+        await redis.del(`webauthn:sqleditor:${challengeId}`);
+        await prisma.webAuthnCredential.update({
+          where: { credentialId },
+          data: {
+            counter: verification.authenticationInfo.newCounter,
+            lastUsedAt: new Date(),
+          },
+        });
+      }
+
+      const u = request.user as { sub: string };
+      const elevationToken = signSqlEditorElevationToken(app, u.sub);
+
+      return reply.send({
+        success: true,
+        data: {
+          elevationToken,
+          expiresInSec: 600,
+        },
+      });
+    },
+  );
 }

@@ -1,21 +1,35 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  Database, Plus, Trash2, Play, ChevronRight, ChevronDown,
+  Plus, Trash2, Play, ChevronRight, ChevronDown,
   Table2, Users, BarChart2, Terminal as TerminalIcon, RefreshCw, AlertTriangle,
+  Fingerprint, KeyRound,
 } from "lucide-react";
-import { apiClient } from "@/lib/api";
+import { startAuthentication } from "@simplewebauthn/browser";
+import { apiClient, ApiError } from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
 import { formatBytes } from "@/lib/utils";
 import type { DbConnection, DbDatabase, DbTable, DbTableRows, DbQueryResult, DbStats, DbUser } from "@hostpanel/types";
 import { MonacoEditor } from "@/components/editor/monaco-editor";
 
 type Tab = "overview" | "browser" | "query" | "users";
 
+const SQL_EDITOR_ELEVATION_KEY = "hp_sql_editor_elevation";
+
 export default function DatabasesPage() {
+  const { user, loading: authLoading } = useAuth();
   const [tab, setTab] = useState<Tab>("overview");
   const [selectedConn, setSelectedConn] = useState("default");
+
+  const showQueryTab = !authLoading && user?.role === "superadmin";
+
+  useEffect(() => {
+    if (!authLoading && !showQueryTab && tab === "query") {
+      setTab("overview");
+    }
+  }, [authLoading, showQueryTab, tab]);
 
   const { data: connsData } = useQuery({
     queryKey: ["db-connections"],
@@ -23,12 +37,22 @@ export default function DatabasesPage() {
   });
   const connections = connsData?.data ?? [];
 
-  const tabs: { id: Tab; label: string; icon: React.ElementType }[] = [
-    { id: "overview", label: "Overview", icon: BarChart2 },
-    { id: "browser", label: "Table Browser", icon: Table2 },
-    { id: "query", label: "Query Editor", icon: TerminalIcon },
-    { id: "users", label: "Users", icon: Users },
-  ];
+  const tabs: { id: Tab; label: string; icon: React.ElementType }[] = useMemo(
+    () =>
+      showQueryTab
+        ? [
+            { id: "overview", label: "Overview", icon: BarChart2 },
+            { id: "browser", label: "Table Browser", icon: Table2 },
+            { id: "query", label: "Query Editor", icon: TerminalIcon },
+            { id: "users", label: "Users", icon: Users },
+          ]
+        : [
+            { id: "overview", label: "Overview", icon: BarChart2 },
+            { id: "browser", label: "Table Browser", icon: Table2 },
+            { id: "users", label: "Users", icon: Users },
+          ],
+    [showQueryTab],
+  );
 
   return (
     <div className="space-y-6 max-w-7xl">
@@ -348,15 +372,103 @@ function BrowserTab({ connectionId }: { connectionId: string }) {
 
 function QueryTab({ connectionId }: { connectionId: string }) {
   const [sql, setSql] = useState(
-    "-- Write your SQL query here\n-- Ctrl+Enter to execute\n\nSELECT table_name, table_type\nFROM information_schema.tables\nWHERE table_schema = 'public'\nORDER BY table_name;"
+    "-- Write your SQL query here\n-- Ctrl+Enter to execute\n\nSELECT table_name, table_type\nFROM information_schema.tables\nWHERE table_schema = 'public'\nORDER BY table_name;",
   );
   const [result, setResult] = useState<DbQueryResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<string[]>([]);
+  const [elevationToken, setElevationToken] = useState<string | null>(null);
+  const [totpCode, setTotpCode] = useState("");
+  const [elevateError, setElevateError] = useState<string | null>(null);
+  const [elevating, setElevating] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const t = sessionStorage.getItem(SQL_EDITOR_ELEVATION_KEY);
+    if (t) setElevationToken(t);
+  }, []);
+
+  function persistElevation(token: string) {
+    sessionStorage.setItem(SQL_EDITOR_ELEVATION_KEY, token);
+    setElevationToken(token);
+  }
+
+  function clearElevation() {
+    sessionStorage.removeItem(SQL_EDITOR_ELEVATION_KEY);
+    setElevationToken(null);
+  }
+
+  async function confirmWithTotp() {
+    setElevateError(null);
+    const code = totpCode.trim();
+    if (!code) {
+      setElevateError("Enter your 6-digit authenticator code.");
+      return;
+    }
+    setElevating(true);
+    try {
+      const res = await apiClient.post<{
+        success: boolean;
+        data?: { elevationToken: string; expiresInSec: number };
+        error?: string;
+      }>("/auth/sql-editor/elevate", { totpCode: code });
+      if (res.success && res.data?.elevationToken) {
+        persistElevation(res.data.elevationToken);
+        setTotpCode("");
+      } else {
+        setElevateError(res.error ?? "Confirmation failed");
+      }
+    } catch (e: unknown) {
+      setElevateError(e instanceof Error ? e.message : "Confirmation failed");
+    } finally {
+      setElevating(false);
+    }
+  }
+
+  async function confirmWithPasskey() {
+    setElevateError(null);
+    setElevating(true);
+    try {
+      const optRes = await apiClient.get<{ success: boolean; data: Record<string, unknown> & { challengeId: string } }>(
+        "/auth/sql-editor/passkey/options",
+      );
+      const { challengeId, ...options } = optRes.data;
+      const credential = await startAuthentication({ optionsJSON: options as any });
+      const res = await apiClient.post<{
+        success: boolean;
+        data?: { elevationToken: string; expiresInSec: number };
+        error?: string;
+      }>("/auth/sql-editor/elevate", {
+        ...credential,
+        challengeId,
+      });
+      if (res.success && res.data?.elevationToken) {
+        persistElevation(res.data.elevationToken);
+      } else {
+        setElevateError(res.error ?? "Passkey confirmation failed");
+      }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Passkey confirmation failed";
+      if (!msg.toLowerCase().includes("cancelled") && !msg.toLowerCase().includes("aborted")) {
+        setElevateError(msg);
+      }
+    } finally {
+      setElevating(false);
+    }
+  }
 
   const queryMutation = useMutation({
-    mutationFn: (payload: { sql: string; connectionId: string }) =>
-      apiClient.post<{ success: boolean; data?: DbQueryResult; error?: string; durationMs?: number }>("/databases/query", payload),
+    mutationFn: (payload: { sql: string; connectionId: string }) => {
+      const headers: Record<string, string> = {};
+      if (elevationToken) {
+        headers["X-SQL-Editor-Elevation"] = elevationToken;
+      }
+      return apiClient.post<{ success: boolean; data?: DbQueryResult; error?: string; durationMs?: number }>(
+        "/databases/query",
+        payload,
+        { headers },
+      );
+    },
     onSuccess: (res) => {
       setError(null);
       if (res.success && res.data) {
@@ -367,17 +479,92 @@ function QueryTab({ connectionId }: { connectionId: string }) {
         setResult(null);
       }
     },
-    onError: (err) => { setError((err as Error).message); setResult(null); },
+    onError: (err) => {
+      if (err instanceof ApiError) {
+        if (err.code === "SQL_EDITOR_STEP_UP_REQUIRED" || (err.status === 403 && /sql editor|elevate|confirmation/i.test(err.message))) {
+          clearElevation();
+          setElevateError("Confirm again with 2FA or your passkey before running SQL.");
+        }
+        setError(err.message);
+      } else {
+        setError((err as Error).message);
+      }
+      setResult(null);
+    },
   });
 
   function runQuery() {
     const trimmed = sql.trim();
     if (!trimmed) return;
+    if (!elevationToken) {
+      setError("Confirm with 2FA or passkey above before running queries.");
+      return;
+    }
     queryMutation.mutate({ sql: trimmed, connectionId });
   }
 
   return (
     <div className="flex flex-col gap-4 h-[calc(100vh-20rem)] min-h-[600px]">
+      <div className="rounded-xl border border-border bg-card/80 p-4 space-y-3">
+        <div className="flex items-start gap-2">
+          <KeyRound className="w-4 h-4 shrink-0 text-muted-foreground mt-0.5" />
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium">SQL editor access</p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Each session requires a short step-up with your authenticator code or a passkey. The confirmation lasts about 10 minutes.
+            </p>
+          </div>
+        </div>
+
+        {elevationToken ? (
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <span className="text-emerald-500 font-medium">Step-up active</span>
+            <button
+              type="button"
+              onClick={clearElevation}
+              className="text-muted-foreground underline hover:text-foreground"
+            >
+              Clear and confirm again
+            </button>
+          </div>
+        ) : (
+          <div className="flex flex-col sm:flex-row sm:flex-wrap gap-3">
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                placeholder="6-digit code"
+                value={totpCode}
+                onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                className="flex h-9 w-36 rounded-md border border-input bg-background px-3 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-ring"
+              />
+              <button
+                type="button"
+                disabled={elevating}
+                onClick={() => void confirmWithTotp()}
+                className="px-3 py-1.5 text-xs bg-secondary text-secondary-foreground rounded-md hover:bg-secondary/80 disabled:opacity-50"
+              >
+                Confirm with 2FA
+              </button>
+            </div>
+            <button
+              type="button"
+              disabled={elevating}
+              onClick={() => void confirmWithPasskey()}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border rounded-md hover:bg-accent disabled:opacity-50"
+            >
+              <Fingerprint className="w-3.5 h-3.5" />
+              Confirm with passkey
+            </button>
+          </div>
+        )}
+
+        {elevateError && (
+          <p className="text-xs text-destructive">{elevateError}</p>
+        )}
+      </div>
+
       {/* Editor */}
       <div className="rounded-xl border bg-card overflow-hidden flex flex-col" style={{ height: "50%" }}>
         <div className="flex items-center justify-between px-4 py-2 border-b border-border bg-secondary/30 shrink-0">
@@ -386,7 +573,7 @@ function QueryTab({ connectionId }: { connectionId: string }) {
             <span className="text-xs text-muted-foreground">Ctrl+Enter to run</span>
             <button
               onClick={runQuery}
-              disabled={queryMutation.isPending}
+              disabled={queryMutation.isPending || !elevationToken}
               className="flex items-center gap-1.5 px-3 py-1 text-xs bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50 transition-colors"
             >
               <Play className="w-3 h-3" />

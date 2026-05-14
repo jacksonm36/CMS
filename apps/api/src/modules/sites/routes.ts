@@ -38,6 +38,7 @@ import {
   PORT_ALLOC_END,
 } from "./site-docker-isolation.js";
 import { requireSiteIsolationDeploy, requireSiteReadForIsolation } from "../../lib/site-isolation-deploy.js";
+import { assertSafeCronCommand, CRON_COMMAND_MAX_LEN } from "../../lib/security-env.js";
 
 /** Allocate the first available port in the configured range. */
 async function allocatePort(): Promise<number | null> {
@@ -98,11 +99,16 @@ const createDbSchema = z.object({
   password: z.string().min(8),
 });
 
-const createCronSchema = z.object({
-  name: z.string().min(1),
-  schedule: z.string().min(1),
-  command: z.string().min(1),
-});
+const createCronSchema = z
+  .object({
+    name: z.string().min(1).max(200),
+    schedule: z.string().min(1).max(120),
+    command: z.string().min(1).max(CRON_COMMAND_MAX_LEN),
+  })
+  .superRefine((data, ctx) => {
+    const r = assertSafeCronCommand(data.command);
+    if (!r.ok) ctx.addIssue({ code: z.ZodIssueCode.custom, message: r.error, path: ["command"] });
+  });
 
 const patchSiteSchema = z
   .object({
@@ -739,7 +745,7 @@ export async function sitesRoutes(app: FastifyInstance) {
   });
 
   // POST /api/sites/:id/crons
-  app.post("/:id/crons", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
+  app.post("/:id/crons", { preHandler: requireRole("superadmin") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const body = createCronSchema.safeParse(request.body);
     if (!body.success) return reply.status(400).send({ success: false, error: body.error.message });
@@ -749,10 +755,21 @@ export async function sitesRoutes(app: FastifyInstance) {
   });
 
   // PATCH /api/sites/:id/crons/:cronId
-  app.patch("/:id/crons/:cronId", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
+  app.patch("/:id/crons/:cronId", { preHandler: requireRole("superadmin") }, async (request, reply) => {
     const { id, cronId } = request.params as { id: string; cronId: string };
-    const body = z.object({ enabled: z.boolean().optional(), schedule: z.string().optional(), command: z.string().optional() }).safeParse(request.body);
+    const body = z
+      .object({
+        enabled: z.boolean().optional(),
+        schedule: z.string().max(120).optional(),
+        command: z.string().max(CRON_COMMAND_MAX_LEN).optional(),
+      })
+      .safeParse(request.body);
     if (!body.success) return reply.status(400).send({ success: false, error: body.error.message });
+
+    if (body.data.command !== undefined) {
+      const r = assertSafeCronCommand(body.data.command);
+      if (!r.ok) return reply.status(400).send({ success: false, error: r.error });
+    }
 
     // Scope to siteId to prevent IDOR across sites
     const cron = await prisma.cronJob.update({ where: { id: cronId, siteId: id }, data: body.data });
@@ -760,7 +777,7 @@ export async function sitesRoutes(app: FastifyInstance) {
   });
 
   // DELETE /api/sites/:id/crons/:cronId
-  app.delete("/:id/crons/:cronId", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
+  app.delete("/:id/crons/:cronId", { preHandler: requireRole("superadmin") }, async (request, reply) => {
     const { id, cronId } = request.params as { id: string; cronId: string };
     // Scope to siteId to prevent IDOR across sites
     await prisma.cronJob.delete({ where: { id: cronId, siteId: id } });

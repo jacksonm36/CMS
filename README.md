@@ -21,6 +21,7 @@ A security-first web hosting control panel inspired by aaPanel — featuring a l
 - [Docker Support](#docker-support)
 - [Nginx Site Config](#nginx-site-config)
 - [API Reference](#api-reference)
+- [Security policy](SECURITY.md)
 - [License](#license)
 
 ---
@@ -41,11 +42,18 @@ HP_CROWDSEC=true \
 curl -fsSL https://raw.githubusercontent.com/jacksonm36/CMS/main/install.sh | sudo bash
 ```
 
-The installer asks for the **panel hostname or LAN IP** when run interactively (TTY), so NextAuth, CORS, and the optional Nginx vhost match how you open the UI. Piped installs (`curl … | bash`) skip that prompt unless you set `HP_DOMAIN`. The installer prints your admin credentials and panel URL at the end. Save them — the password is auto-generated and not stored in plain text after install.
+The installer asks for the **panel hostname or LAN IP** when run interactively (TTY), so NextAuth, CORS, and the optional Nginx vhost match how you open the UI. When you use a **raw IPv4** without a domain, the installer uses **nip.io** (e.g. `192-168-0-1.nip.io`) for WebAuthn/passkeys — open the panel with that hostname, not the IP. Piped installs (`curl … | bash`) skip that prompt unless you set `HP_DOMAIN`. The installer prints your admin credentials and panel URL at the end. Save them — the password is auto-generated and not stored in plain text after install.
 
 ---
 
 ## Install Options
+
+
+### Production installer behaviour
+
+The bare-metal script performs a **locked install** when `package-lock.json` is present (`npm ci`), runs **`npm audit`** at **critical** severity (set `HP_NPM_AUDIT_FAIL=true` to abort the install on any critical finding), prints high-severity advisories for awareness, generates cryptographically strong secrets (JWT, session, **NEXTAUTH_SECRET**, **JWT_REFRESH_SECRET**), configures **WebAuthn** `rpID` automatically (using **nip.io** when you access the panel by IPv4), enables **ufw** and (by default) **fail2ban**, and sets **`HOSTPANEL_AUTO_MIGRATE=true`** so the API runs Prisma migrations at startup.
+
+See [SECURITY.md](SECURITY.md) for secrets handling, webhooks, and hardening overview).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -59,7 +67,10 @@ The installer asks for the **panel hostname or LAN IP** when run interactively (
 | `HP_CROWDSEC` | `true` | Install CrowdSec security engine |
 | `HP_INSTALL_DIR` | `/opt/hostpanel` | Installation directory |
 | `HP_NODE_VERSION` | `20` | Node.js major version |
-| `HP_STAGING_ACME` | `true` | Use Let's Encrypt staging (set `false` for production) |
+| `HP_STAGING_ACME` | `false` | Let's Encrypt **production** by default; set `true` for staging only |
+| `HP_FAIL2BAN` | `true` | Install **fail2ban** for SSH (set `false` to skip) |
+| `HP_NPM_AUDIT_FAIL` | `false` | If `true`, abort install when `npm audit` reports **critical** issues |
+| `HP_REPO_URL` / `HP_REPO_BRANCH` | GitHub defaults | Clone source for `install.sh` when not copying from a local tree |
 | `HP_DOCKER_ROOTFUL_ONLY` | `false` | Skip rootless Docker attempt (useful for LXC containers) |
 | `HP_DOCKER_FALLBACK_ROOTFUL` | `true` | Fall back to rootful Docker if rootless setup fails |
 
@@ -83,7 +94,8 @@ The installer asks for the **panel hostname or LAN IP** when run interactively (
 - **PHP 8.2 FPM** — for PHP site support (ondrej/sury PPA)
 - **CrowdSec** — collaborative threat intelligence + iptables bouncer *(optional)*
 - **Docker** — rootless (preferred) or rootful, for isolated site containers *(optional)*
-- **HostPanel** — systemd services `hostpanel-api` + `hostpanel-web`
+- **fail2ban** — SSH brute-force mitigation *(optional; installer default on)*
+- **HostPanel** — systemd services `hostpanel-api` + `hostpanel-web` *(reproducible `npm ci` + audit when lockfile present)*
 
 ---
 

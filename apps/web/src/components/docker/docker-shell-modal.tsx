@@ -17,8 +17,11 @@ export function DockerShellModal({ containerRef, containerName, onClose }: Docke
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
+    if (!terminalRef.current) return;
+
     let dead = false;
     let ro: ResizeObserver | null = null;
+    let activeWs: WebSocket | null = null;
 
     (async () => {
       const { Terminal } = await import("xterm");
@@ -84,59 +87,65 @@ export function DockerShellModal({ containerRef, containerName, onClose }: Docke
         term.write(String(data));
       };
 
-      fitAddon.fit();
-      // Defer focus to a rAF tick so the browser treats it as a paint-cycle
-      // call rather than a deep-async call — browsers silently drop focus()
-      // on off-screen elements invoked from inside Promise chains.
-      requestAnimationFrame(() => { if (!dead) term.focus(); });
-
-      const wsUrl = getBrowserApiWebSocketBase();
-      const token = localStorage.getItem("hp_token");
-      const sizeQuery = `?cols=${term.cols}&rows=${term.rows}`;
-      const path = `/api/docker/containers/${encodeURIComponent(containerRef)}/terminal${sizeQuery}`;
-      const wsProto = token ? jwtToWebSocketProtocol(token) : "";
-      const ws = token
-        ? new WebSocket(`${wsUrl}${path}`, [wsProto])
-        : new WebSocket(`${wsUrl}${path}`);
-      ws.binaryType = "arraybuffer";
-      wsRef.current = ws;
-
-      if (dead) {
-        ws.close();
-        term.dispose();
-        xtermRef.current = null;
-        return;
-      }
-
-      const pendingStdin: string[] = [];
-      term.onData((sendData) => {
-        if (ws.readyState === WebSocket.OPEN) ws.send(sendData);
-        else pendingStdin.push(sendData);
+      requestAnimationFrame(() => {
+        if (!dead) term.focus();
       });
 
+      const pendingStdin: string[] = [];
+
       const sendResize = (cols: number, rows: number) => {
-        if (ws.readyState === WebSocket.OPEN) {
+        const ws = activeWs;
+        if (ws?.readyState === WebSocket.OPEN) {
           ws.send(new TextEncoder().encode(JSON.stringify({ r: [cols, rows] })));
         }
       };
 
-      term.onResize(({ cols, rows }) => sendResize(cols, rows));
+      term.onData((sendData) => {
+        const ws = activeWs;
+        if (ws?.readyState === WebSocket.OPEN) ws.send(sendData);
+        else pendingStdin.push(sendData);
+      });
 
-      ws.onopen = () => {
-        for (const chunk of pendingStdin) ws.send(chunk);
-        pendingStdin.length = 0;
-        // PTY already created with correct size from URL params; only send
-        // resize if the browser window changed between fitAddon.fit() and WS open.
-        if (term.cols !== parseInt(new URL(ws.url).searchParams.get("cols") ?? "0") ||
-            term.rows !== parseInt(new URL(ws.url).searchParams.get("rows") ?? "0")) {
-          sendResize(term.cols, term.rows);
-        }
-        term.focus();
+      term.onResize(({ cols: c, rows: r }) => sendResize(c, r));
+
+      /** Open WS after layout so FitAddon sees non-zero cols/rows (modal flex timing). */
+      const connectWs = () => {
+        if (dead || !terminalRef.current) return;
+        fitAddon.fit();
+        const cols = Math.max(term.cols, 2);
+        const rows = Math.max(term.rows, 2);
+        const sizeQuery = `?cols=${cols}&rows=${rows}`;
+        const wsUrl = getBrowserApiWebSocketBase();
+        const token = localStorage.getItem("hp_token");
+        const path = `/api/docker/containers/${encodeURIComponent(containerRef)}/terminal${sizeQuery}`;
+        const wsProto = token ? jwtToWebSocketProtocol(token) : "";
+        const ws = token ? new WebSocket(`${wsUrl}${path}`, [wsProto]) : new WebSocket(`${wsUrl}${path}`);
+        ws.binaryType = "arraybuffer";
+        wsRef.current = ws;
+        activeWs = ws;
+
+        ws.onopen = () => {
+          for (const chunk of pendingStdin) ws.send(chunk);
+          pendingStdin.length = 0;
+          const openedCols = parseInt(new URL(ws.url).searchParams.get("cols") ?? "0", 10);
+          const openedRows = parseInt(new URL(ws.url).searchParams.get("rows") ?? "0", 10);
+          fitAddon.fit();
+          if (term.cols !== openedCols || term.rows !== openedRows) {
+            sendResize(term.cols, term.rows);
+          }
+          term.focus();
+        };
+
+        ws.onmessage = (e) => writeWsPayload(e.data);
+        ws.onclose = () => term.writeln("\r\n\x1b[31m✗ Connection closed\x1b[0m\r\n");
+        ws.onerror = () => term.writeln("\r\n\x1b[33m⚠ WebSocket error\x1b[0m\r\n");
       };
 
-      ws.onmessage = (e) => writeWsPayload(e.data);
-      ws.onclose = () => term.writeln("\r\n\x1b[31m✗ Connection closed\x1b[0m\r\n");
-      ws.onerror = () => term.writeln("\r\n\x1b[33m⚠ WebSocket error\x1b[0m\r\n");
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (!dead) connectWs();
+        });
+      });
 
       if (!dead && terminalRef.current) {
         ro = new ResizeObserver(() => {
@@ -149,6 +158,7 @@ export function DockerShellModal({ containerRef, containerName, onClose }: Docke
     return () => {
       dead = true;
       ro?.disconnect();
+      activeWs = null;
       wsRef.current?.close();
       wsRef.current = null;
       if (xtermRef.current) {
@@ -183,6 +193,10 @@ export function DockerShellModal({ containerRef, containerName, onClose }: Docke
           </button>
         </div>
         <p className="text-[11px] text-muted-foreground px-4 py-1.5 border-b border-border shrink-0">
+          <span className="font-mono text-[10px] text-foreground/70" title={containerRef}>
+            {containerRef.length > 28 ? `${containerRef.slice(0, 14)}…${containerRef.slice(-12)}` : containerRef}
+          </span>
+          {" · "}
           Interactive <code className="text-[10px]">/bin/sh</code> via <code className="text-[10px]">docker exec -it</code> (PTY). Tenant
           sidecars open in <code className="text-[10px]">/srv</code> by default. Container must be running.
         </p>

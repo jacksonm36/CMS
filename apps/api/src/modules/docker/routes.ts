@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { DockerContainerRow, Role } from "@hostpanel/types";
 import { requireDockerPanel, requireRole } from "../../lib/auth.js";
 import {
+  decodeTerminalWsMessage,
   dockerContainerRunningState,
   dockerExecShellWorkdir,
   dockerInspect,
@@ -16,7 +17,6 @@ import {
   dockerRemove,
   enrichDockerContainerRow,
   isValidDockerContainerRef,
-  parseResizeFrame,
   sanitizeDockerExecWorkdir,
   spawnDockerInteractiveShell,
   validatePortBindings,
@@ -315,18 +315,12 @@ export async function dockerRoutes(app: FastifyInstance) {
 
       socket.on("message", (raw: unknown) => {
         if (!shell || shellDead) return;
-        // ws delivers ALL frames (including text) as Buffer; check for resize
-        // first, then fall through to writing keyboard input.
-        if (Buffer.isBuffer(raw)) {
-          const resize = parseResizeFrame(raw);
-          if (resize) {
-            try { shell.resize(resize.cols, resize.rows); } catch { /* ignore */ }
-            return;
-          }
-          shell.write(raw.toString("utf8"));
+        const msg = decodeTerminalWsMessage(raw);
+        if (msg.kind === "resize") {
+          try { shell.resize(msg.cols, msg.rows); } catch { /* ignore */ }
           return;
         }
-        shell.write(typeof raw === "string" ? raw : String(raw));
+        shell.write(msg.data);
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

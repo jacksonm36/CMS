@@ -400,7 +400,8 @@ export async function webserversRoutes(app: FastifyInstance) {
   app.get("/:id/logs", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const query = request.query as { lines?: string; type?: string };
-    const lines = Math.min(500, Number(query.lines ?? 100));
+    const n = Number(query.lines);
+    const lines = Math.min(500, Math.max(1, Number.isFinite(n) && n > 0 ? Math.floor(n) : 100));
     const logType = query.type === "access" ? "access" : "error";
 
     const logFiles: Record<string, Record<string, string>> = {

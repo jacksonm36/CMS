@@ -14,11 +14,17 @@
 
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { execFile } from "node:child_process";
 import { exec } from "child_process";
+import { isIP } from "node:net";
 import { promisify } from "util";
 import { requireRole } from "../../lib/auth.js";
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+
+const DECISION_ID_RE = /^[a-zA-Z0-9_-]{1,128}$/;
+const BOUNCER_NAME_RE = /^[a-zA-Z0-9_.-]{1,128}$/;
 
 const CROWDSEC_API = process.env.CROWDSEC_API_URL ?? "http://127.0.0.1:8080";
 const CROWDSEC_KEY = process.env.CROWDSEC_API_KEY ?? "";
@@ -48,6 +54,24 @@ async function csApi<T = unknown>(
   }
 }
 
+async function runCscli(args: string[]): Promise<{ stdout: string; stderr: string; ok: boolean }> {
+  try {
+    const { stdout, stderr } = await execFileAsync("cscli", args, {
+      timeout: 20_000,
+      maxBuffer: 10 * 1024 * 1024,
+      encoding: "utf8",
+    });
+    return { ok: true, stdout: String(stdout).trim(), stderr: String(stderr).trim() };
+  } catch (err: unknown) {
+    const e = err as { stdout?: string; stderr?: string; message?: string };
+    return {
+      ok: false,
+      stdout: String(e.stdout ?? "").trim(),
+      stderr: String(e.stderr ?? e.message ?? "").trim(),
+    };
+  }
+}
+
 async function runCmd(cmd: string): Promise<{ stdout: string; stderr: string; ok: boolean }> {
   try {
     const { stdout, stderr } = await execAsync(cmd, { timeout: 20000 });
@@ -66,7 +90,7 @@ export async function crowdsecRoutes(app: FastifyInstance) {
     const [heartbeat, agentStatus, bouncerStatus] = await Promise.all([
       csApi("/heartbeat"),
       runCmd("systemctl is-active crowdsec 2>/dev/null || cscli version 2>/dev/null | head -1"),
-      runCmd("cscli bouncers list -o json 2>/dev/null"),
+      runCscli(["bouncers", "list", "-o", "json"]),
     ]);
 
     const isInstalled = agentStatus.ok || agentStatus.stdout.includes("version");
@@ -89,7 +113,7 @@ export async function crowdsecRoutes(app: FastifyInstance) {
 
   // GET /api/crowdsec/metrics — hub metrics / scenario counts
   app.get("/metrics", { preHandler: requireRole("superadmin", "admin") }, async (_request, reply) => {
-    const result = await runCmd("cscli metrics -o json 2>/dev/null || echo '{}'");
+    const result = await runCscli(["metrics", "-o", "json"]);
     try {
       return reply.send({ success: true, data: JSON.parse(result.stdout) });
     } catch {
@@ -110,7 +134,8 @@ export async function crowdsecRoutes(app: FastifyInstance) {
 
     if (!result.ok) {
       // Fallback: try cscli CLI
-      const cli = await runCmd(`cscli alerts list -o json --limit ${query.limit ?? 50} 2>/dev/null || echo '[]'`);
+      const lim = Math.min(500, Math.max(1, Number.parseInt(String(query.limit ?? "50"), 10) || 50));
+      const cli = await runCscli(["alerts", "list", "-o", "json", "--limit", String(lim)]);
       try {
         return reply.send({ success: true, data: JSON.parse(cli.stdout) });
       } catch {
@@ -132,7 +157,7 @@ export async function crowdsecRoutes(app: FastifyInstance) {
     const result = await csApi<unknown[]>(`/decisions?${params}`);
 
     if (!result.ok) {
-      const cli = await runCmd(`cscli decisions list -o json 2>/dev/null || echo '[]'`);
+      const cli = await runCscli(["decisions", "list", "-o", "json"]);
       try {
         return reply.send({ success: true, data: JSON.parse(cli.stdout) });
       } catch {
@@ -147,13 +172,17 @@ export async function crowdsecRoutes(app: FastifyInstance) {
   app.post("/decisions", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
     const body = z.object({
       ip: z.string().min(1),
-      duration: z.string().default("4h"),
-      reason: z.string().default("Manual ban from HostPanel"),
+      duration: z.string().min(1).max(32).default("4h"),
+      reason: z.string().max(2000).default("Manual ban from HostPanel"),
       type: z.enum(["ban", "captcha"]).default("ban"),
     }).safeParse(request.body);
 
     if (!body.success) return reply.status(400).send({ success: false, error: body.error.message });
     const { ip, duration, reason, type } = body.data;
+
+    if (!isIP(ip)) {
+      return reply.status(400).send({ success: false, error: "Invalid IPv4/IPv6 address" });
+    }
 
     // Try LAPI first
     const result = await csApi("/decisions", {
@@ -169,9 +198,7 @@ export async function crowdsecRoutes(app: FastifyInstance) {
 
     if (!result.ok) {
       // Fallback: cscli CLI
-      const cli = await runCmd(
-        `cscli decisions add --ip "${ip}" --duration "${duration}" --reason "${reason}" --type "${type}" 2>&1`
-      );
+      const cli = await runCscli(["decisions", "add", "--ip", ip, "--duration", duration, "--reason", reason, "--type", type]);
       if (!cli.ok) return reply.status(500).send({ success: false, error: cli.stderr });
       return reply.status(201).send({ success: true, message: `${ip} ${type === "ban" ? "banned" : "captcha'd"} for ${duration}` });
     }
@@ -182,11 +209,14 @@ export async function crowdsecRoutes(app: FastifyInstance) {
   // DELETE /api/crowdsec/decisions/:id — unban/remove a decision
   app.delete("/decisions/:id", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
     const { id } = request.params as { id: string };
+    if (!DECISION_ID_RE.test(id)) {
+      return reply.status(400).send({ success: false, error: "Invalid decision id" });
+    }
 
     const result = await csApi(`/decisions/${id}`, { method: "DELETE" });
 
     if (!result.ok) {
-      const cli = await runCmd(`cscli decisions delete --id "${id}" 2>&1`);
+      const cli = await runCscli(["decisions", "delete", "--id", id]);
       if (!cli.ok) return reply.status(500).send({ success: false, error: cli.stderr });
     }
 
@@ -196,12 +226,14 @@ export async function crowdsecRoutes(app: FastifyInstance) {
   // DELETE /api/crowdsec/decisions — unban by IP
   app.delete("/decisions", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
     const query = request.query as { ip?: string };
-    if (!query.ip) return reply.status(400).send({ success: false, error: "ip query param required" });
+    if (!query.ip || !isIP(query.ip)) {
+      return reply.status(400).send({ success: false, error: "Valid ip query param required" });
+    }
 
     const result = await csApi(`/decisions?ip=${encodeURIComponent(query.ip)}`, { method: "DELETE" });
 
     if (!result.ok) {
-      const cli = await runCmd(`cscli decisions delete --ip "${query.ip}" 2>&1`);
+      const cli = await runCscli(["decisions", "delete", "--ip", query.ip]);
       if (!cli.ok) return reply.status(500).send({ success: false, error: cli.stderr });
     }
 
@@ -211,10 +243,10 @@ export async function crowdsecRoutes(app: FastifyInstance) {
   // GET /api/crowdsec/hub — installed collections & parsers
   app.get("/hub", { preHandler: requireRole("superadmin", "admin") }, async (_request, reply) => {
     const [collections, parsers, scenarios, postoverflows] = await Promise.all([
-      runCmd("cscli collections list -o json 2>/dev/null || echo '[]'"),
-      runCmd("cscli parsers list -o json 2>/dev/null || echo '[]'"),
-      runCmd("cscli scenarios list -o json 2>/dev/null || echo '[]'"),
-      runCmd("cscli postoverflows list -o json 2>/dev/null || echo '[]'"),
+      runCscli(["collections", "list", "-o", "json"]),
+      runCscli(["parsers", "list", "-o", "json"]),
+      runCscli(["scenarios", "list", "-o", "json"]),
+      runCscli(["postoverflows", "list", "-o", "json"]),
     ]);
 
     function safeParse(s: string) { try { return JSON.parse(s); } catch { return []; } }
@@ -232,16 +264,18 @@ export async function crowdsecRoutes(app: FastifyInstance) {
 
   // POST /api/crowdsec/hub/update — cscli hub update
   app.post("/hub/update", { preHandler: requireRole("superadmin") }, async (_request, reply) => {
-    const result = await runCmd("cscli hub update 2>&1 && cscli hub upgrade 2>&1");
+    const u = await runCscli(["hub", "update"]);
+    const up = await runCscli(["hub", "upgrade"]);
+    const result = { ok: u.ok && up.ok, stdout: `${u.stdout}\n${up.stdout}`, stderr: `${u.stderr}\n${up.stderr}` };
     return reply.send({ success: result.ok, data: { output: result.stdout || result.stderr } });
   });
 
   // POST /api/crowdsec/bouncers — register a new bouncer
   app.post("/bouncers", { preHandler: requireRole("superadmin") }, async (request, reply) => {
-    const body = z.object({ name: z.string().min(1) }).safeParse(request.body);
+    const body = z.object({ name: z.string().min(1).max(128).regex(BOUNCER_NAME_RE) }).safeParse(request.body);
     if (!body.success) return reply.status(400).send({ success: false, error: "name required" });
 
-    const result = await runCmd(`cscli bouncers add "${body.data.name}" -o json 2>&1`);
+    const result = await runCscli(["bouncers", "add", body.data.name, "-o", "json"]);
     try {
       const data = JSON.parse(result.stdout);
       return reply.status(201).send({ success: true, data });
@@ -254,7 +288,10 @@ export async function crowdsecRoutes(app: FastifyInstance) {
   // DELETE /api/crowdsec/bouncers/:name — remove bouncer
   app.delete("/bouncers/:name", { preHandler: requireRole("superadmin") }, async (request, reply) => {
     const { name } = request.params as { name: string };
-    const result = await runCmd(`cscli bouncers delete "${name}" 2>&1`);
+    if (!BOUNCER_NAME_RE.test(name)) {
+      return reply.status(400).send({ success: false, error: "Invalid bouncer name" });
+    }
+    const result = await runCscli(["bouncers", "delete", name]);
     if (!result.ok) return reply.status(500).send({ success: false, error: result.stderr });
     return reply.send({ success: true, message: `Bouncer '${name}' removed` });
   });
@@ -277,7 +314,7 @@ export async function crowdsecRoutes(app: FastifyInstance) {
   // GET /api/crowdsec/logs — tail CrowdSec agent log
   app.get("/logs", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
     const query = request.query as { lines?: string };
-    const lines = Math.min(500, Number(query.lines ?? 100));
+    const lines = Math.min(500, Math.max(1, Number.parseInt(String(query.lines ?? "100"), 10) || 100));
     const result = await runCmd(
       `journalctl -u crowdsec --no-pager -n ${lines} 2>/dev/null || tail -n ${lines} /var/log/crowdsec/crowdsec.log 2>/dev/null || echo 'Log not available'`
     );

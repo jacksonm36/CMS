@@ -28,7 +28,17 @@ import { ipBlockMiddleware } from "./middleware/ipBlock.js";
 import { auditMiddleware } from "./middleware/audit.js";
 import { startMonitoringWorker } from "./modules/monitoring/worker.js";
 import { startCronWorker } from "./modules/sites/cron-worker.js";
-import { assertProductionSecrets, corsOriginConfig } from "./lib/security-env.js";
+import {
+  assertProductionSecrets,
+  applyHttpSecurityHeaders,
+  corsOriginConfig,
+  getJwtSecret,
+  getSqlEditorJwtSecret,
+  JWT_ISS,
+  JWT_AUD,
+  JWT_AUD_SQL_EDITOR,
+} from "./lib/security-env.js";
+import { getRedis } from "./lib/redis.js";
 import { runMigrateDeployIfEnabled } from "./lib/prisma-migrate-on-start.js";
 
 await runMigrateDeployIfEnabled();
@@ -41,6 +51,31 @@ const app = Fastify({
   trustProxy: true,
 });
 
+app.addHook("onRequest", async (request, reply) => {
+  applyHttpSecurityHeaders(request, reply);
+});
+
+// Preserve raw JSON bytes for HMAC verification (e.g. GitHub webhooks).
+app.removeContentTypeParser("application/json");
+app.addContentTypeParser(
+  "application/json",
+  { parseAs: "buffer" },
+  (request, body, done) => {
+    const buf = Buffer.isBuffer(body) ? body : Buffer.from(body, "utf8");
+    request.rawBody = buf;
+    try {
+      if (buf.length === 0) {
+        done(null, {});
+        return;
+      }
+      const json = JSON.parse(buf.toString("utf8")) as unknown;
+      done(null, json);
+    } catch (err) {
+      done(err as Error, undefined);
+    }
+  }
+);
+
 // ─── Plugins ─────────────────────────────────────────────────────────────────
 
 await app.register(cors, {
@@ -50,16 +85,52 @@ await app.register(cors, {
 
 await app.register(cookie);
 
+const jwtSecret = getJwtSecret();
+const sqlEditorSecret = getSqlEditorJwtSecret();
+
 await app.register(jwt, {
-  secret: process.env.JWT_SECRET ?? "dev-secret-change-in-production",
-  sign: { expiresIn: "7d" },
+  secret: jwtSecret,
+  sign: {
+    expiresIn: "7d",
+    algorithm: "HS256",
+    iss: JWT_ISS,
+    aud: JWT_AUD,
+  },
+  verify: {
+    algorithms: ["HS256"],
+    allowedIss: JWT_ISS,
+    allowedAud: JWT_AUD,
+  },
 });
 
+await app.register(jwt, {
+  namespace: "sqlEditor",
+  secret: sqlEditorSecret,
+  sign: {
+    expiresIn: "10m",
+    algorithm: "HS256",
+    iss: JWT_ISS,
+    aud: JWT_AUD_SQL_EDITOR,
+  },
+  verify: {
+    algorithms: ["HS256"],
+    allowedIss: JWT_ISS,
+    allowedAud: JWT_AUD_SQL_EDITOR,
+  },
+});
+
+const useRedisRateLimit = Boolean(process.env.REDIS_URL?.trim());
 await app.register(rateLimit, {
   global: true,
   max: 200,
   timeWindow: "1 minute",
-  redis: undefined, // Will use in-memory; swap to Redis instance for production
+  ...(useRedisRateLimit
+    ? {
+        redis: getRedis(),
+        nameSpace: "hostpanel-rl-",
+        skipOnError: true,
+      }
+    : { redis: undefined }),
 });
 
 await app.register(multipart, { limits: { fileSize: 100 * 1024 * 1024 } }); // 100MB

@@ -11,6 +11,7 @@ import { z } from "zod";
 import { prisma } from "@hostpanel/db";
 import { requireAuth } from "../../lib/auth.js";
 import { getRedis } from "../../lib/redis.js";
+import { recordFailedLogin } from "../../middleware/ipBlock.js";
 import { HP_TOKEN_COOKIE } from "../../lib/ws-auth.js";
 
 const CHALLENGE_TTL = 300; // 5 minutes
@@ -26,7 +27,7 @@ const CHALLENGE_TTL = 300; // 5 minutes
  * This means passkeys just work regardless of whether the user is on localhost,
  * an IP, a local domain, or a public HTTPS domain.
  */
-function getRpConfig(requestOrigin?: string) {
+export function getRpConfig(requestOrigin?: string) {
   const fallbackOrigin = process.env.NEXTAUTH_URL ?? "http://localhost:3000";
 
   // Use the actual request origin when no explicit env override is set
@@ -123,9 +124,8 @@ export async function passkeyRoutes(app: FastifyInstance) {
         requireUserVerification: false,
       };
       verification = await verifyRegistrationResponse(opts);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Verification failed";
-      return reply.status(400).send({ success: false, error: msg });
+    } catch {
+      return reply.status(400).send({ success: false, error: "Passkey registration could not be verified" });
     }
 
     if (!verification.verified || !verification.registrationInfo) {
@@ -155,7 +155,10 @@ export async function passkeyRoutes(app: FastifyInstance) {
   // ── Authentication ────────────────────────────────────────────────────────
 
   // GET /api/auth/passkey/login/options  (no auth required)
-  app.get("/login/options", async (request, reply) => {
+  app.get(
+    "/login/options",
+    { config: { rateLimit: { max: 40, timeWindow: "1 minute" } } },
+    async (request, reply) => {
     const { rpID } = getRpConfig(request.headers.origin);
     const challengeId = crypto.randomUUID();
 
@@ -171,7 +174,10 @@ export async function passkeyRoutes(app: FastifyInstance) {
   });
 
   // POST /api/auth/passkey/login/verify  (no auth required)
-  app.post("/login/verify", async (request, reply) => {
+  app.post(
+    "/login/verify",
+    { config: { rateLimit: { max: 25, timeWindow: "1 minute" } } },
+    async (request, reply) => {
     const { rpID, allowedOrigins } = getRpConfig(request.headers.origin);
     const body = request.body as any;
     const { challengeId, ...authResponse } = body as { challengeId: string; [k: string]: unknown };
@@ -193,7 +199,8 @@ export async function passkeyRoutes(app: FastifyInstance) {
     });
 
     if (!cred) {
-      return reply.status(401).send({ success: false, error: "Passkey not recognised" });
+      await recordFailedLogin(request.ip);
+      return reply.status(401).send({ success: false, error: "Passkey verification failed" });
     }
 
     let verification;
@@ -212,9 +219,8 @@ export async function passkeyRoutes(app: FastifyInstance) {
         },
       };
       verification = await verifyAuthenticationResponse(opts);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Verification failed";
-      return reply.status(401).send({ success: false, error: msg });
+    } catch {
+      return reply.status(401).send({ success: false, error: "Passkey verification failed" });
     }
 
     if (!verification.verified) {

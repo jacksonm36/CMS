@@ -35,7 +35,7 @@ export async function auditMiddleware(request: FastifyRequest, reply: FastifyRep
         userAgent: request.headers["user-agent"] ?? null,
         meta: {
           statusCode: reply.statusCode,
-          body: request.body ? sanitizeBody(request.body) : undefined,
+          body: request.body ? (sanitizeBody(request.body) as object) : undefined,
         },
       },
     });
@@ -45,10 +45,53 @@ export async function auditMiddleware(request: FastifyRequest, reply: FastifyRep
 }
 
 function sanitizeBody(body: unknown): unknown {
-  if (typeof body !== "object" || body === null) return body;
-  const sanitized = { ...(body as Record<string, unknown>) };
-  for (const key of ["password", "passwordHash", "token", "secret", "totpSecret"]) {
-    if (key in sanitized) sanitized[key] = "[REDACTED]";
+  return deepRedactSensitive(body);
+}
+
+const SENSITIVE_KEY = new Set([
+  "password",
+  "passwordhash",
+  "passwordHash",
+  "currentpassword",
+  "newpassword",
+  "token",
+  "secret",
+  "totpsecret",
+  "authorization",
+  "credential",
+  "assertion",
+  "clientdatajson",
+  "authenticatordata",
+  "signature",
+  "totpcode",
+  "code",
+  "refreshtoken",
+  "accesstoken",
+  "apikey",
+  "api_key",
+  "elevationtoken",
+]);
+
+function isSensitiveKey(key: string): boolean {
+  const lower = key.toLowerCase();
+  if (SENSITIVE_KEY.has(lower)) return true;
+  if (lower.includes("password")) return true;
+  if (lower.includes("secret")) return true;
+  return false;
+}
+
+function deepRedactSensitive(val: unknown, depth = 0): unknown {
+  if (depth > 12) return "[TRUNCATED]";
+  if (val === null || val === undefined) return val;
+  if (Array.isArray(val)) return val.map((x) => deepRedactSensitive(x, depth + 1));
+  if (typeof val !== "object") return val;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
+    if (isSensitiveKey(k)) {
+      out[k] = "[REDACTED]";
+    } else {
+      out[k] = deepRedactSensitive(v, depth + 1);
+    }
   }
-  return sanitized;
+  return out;
 }

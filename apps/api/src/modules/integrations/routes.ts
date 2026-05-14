@@ -1,8 +1,10 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { createHash, randomBytes } from "crypto";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@hostpanel/db";
 import { requireAuth, requireRole } from "../../lib/auth.js";
+import { isValidGithubSignature256 } from "../../lib/github-webhook.js";
 import { triggerWebhook } from "./webhook.js";
 
 const webhookSchema = z.object({
@@ -126,10 +128,17 @@ export async function integrationsRoutes(app: FastifyInstance) {
     });
     if (!body.success) return reply.status(400).send({ success: false, error: body.error.message });
 
+    const integrationPayload: Prisma.IntegrationCreateInput = {
+      provider: body.data.provider,
+      name: body.data.name,
+      enabled: body.data.enabled,
+      config: body.data.config as Prisma.InputJsonValue,
+    };
+
     const integration = await prisma.integration.upsert({
       where: { provider: body.data.provider },
-      update: body.data,
-      create: body.data,
+      update: integrationPayload,
+      create: integrationPayload,
     });
 
     return reply.send({ success: true, data: integration });
@@ -144,11 +153,13 @@ export async function integrationsRoutes(app: FastifyInstance) {
     }
 
     const config = integration.config as Record<string, string>;
-    if (config.webhookSecret && signature) {
-      const expected = `sha256=${createHash("sha256")
-        .update(JSON.stringify(request.body))
-        .digest("hex")}`;
-      if (signature !== expected) {
+    const secret = config.webhookSecret?.trim();
+    if (secret) {
+      if (!signature) {
+        return reply.status(401).send({ success: false, error: "Missing signature" });
+      }
+      const rawBody = request.rawBody;
+      if (!rawBody || !isValidGithubSignature256(rawBody, signature, secret)) {
         return reply.status(401).send({ success: false, error: "Invalid signature" });
       }
     }
