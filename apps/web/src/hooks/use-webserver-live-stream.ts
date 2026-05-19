@@ -16,7 +16,7 @@ export type WebserverLiveMessage = {
   errorTail: string[];
 };
 
-const LIVE_SERVER_IDS = new Set<WebServerType>(["nginx", "openresty"]);
+const LIVE_SERVER_IDS = new Set<WebServerType>(["nginx", "openresty", "apache2", "lighttpd", "litespeed", "caddy", "traefik"]);
 
 function isWebserverLiveMessage(x: unknown): x is WebserverLiveMessage {
   if (!x || typeof x !== "object") return false;
@@ -28,7 +28,7 @@ export function useWebserverLiveStream(opts: {
   enabled: boolean;
   token: string | null;
   serverId: WebServerType;
-  /** Nginx / OpenResty access log scope */
+  /** Web server log scope (nginx: panel vs daemon) */
   scope: "daemon" | "panel";
 }) {
   const { enabled, token, serverId, scope } = opts;

@@ -4,7 +4,8 @@ import { promisify } from "util";
 import { verifyWsJwt } from "../../lib/ws-auth.js";
 import type { WebServerType } from "../sites/webservers/index.js";
 import { buildAccessLogAnalytics } from "./access-log-analytics.js";
-import { gatherMergedAccessSample, gatherMergedAccessTail, gatherMergedErrorTail } from "./nginx-access-sample.js";
+import { gatherMergedAccessSample, gatherMergedAccessTail, gatherMergedErrorTail } from "./webserver-log-gather.js"
+import { supportsMergedDaemonLogs } from "./webserver-log-dirs.js";
 import { resolveWebserverLogPath } from "./webserver-log-paths.js";
 
 const execAsync = promisify(exec);
@@ -19,10 +20,10 @@ async function runCmd(cmd: string, timeoutMs = 30000): Promise<{ stdout: string;
   }
 }
 
-const LIVE_STREAM_IDS = new Set<WebServerType>(["nginx", "openresty"]);
+const LIVE_STREAM_IDS = new Set<WebServerType>(["nginx", "openresty", "apache2", "lighttpd", "litespeed", "caddy", "traefik"]);
 
 /**
- * WebSocket: periodic access-log analytics + short access/error tails (nginx / OpenResty).
+ * WebSocket: periodic access-log analytics + short access/error tails (all stacks).
  * Path relative to `/api/webservers` prefix → `GET /api/webservers/live-stream?server=nginx&scope=daemon`.
  */
 export function registerWebserverLiveStream(app: FastifyInstance): void {
@@ -37,7 +38,7 @@ export function registerWebserverLiveStream(app: FastifyInstance): void {
     const raw = (q.server ?? "nginx").trim() as WebServerType;
     if (!LIVE_STREAM_IDS.has(raw)) {
       try {
-        socket.send(JSON.stringify({ type: "error", message: "Live stream supports nginx and openresty only." }));
+        socket.send(JSON.stringify({ type: "error", message: "Live stream not available for this server." }));
       } catch {
         /* ignore */
       }
@@ -57,8 +58,7 @@ export function registerWebserverLiveStream(app: FastifyInstance): void {
           return;
         }
 
-        const useMerged =
-          scope === "daemon" && (serverId === "nginx" || serverId === "openresty");
+        const useMerged = supportsMergedDaemonLogs(serverId, scope);
         let accessRaw: string;
         let logPathLabel = accessPath;
         if (useMerged) {
@@ -92,7 +92,7 @@ export function registerWebserverLiveStream(app: FastifyInstance): void {
         const analytics = {
           logPath: logPathLabel,
           scope,
-          sourceHint: useMerged ? "Merged main + per-vhost *.access.log." : undefined,
+          sourceHint: useMerged ? "Merged main + per-vhost logs for this stack." : undefined,
           ...stats,
         };
 

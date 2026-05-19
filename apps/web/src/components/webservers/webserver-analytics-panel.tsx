@@ -33,7 +33,7 @@ function trunc(s: string | null, max: number): string {
   return s.length <= max ? s : `${s.slice(0, max)}…`;
 }
 
-const LIVE_CAPABLE: ReadonlySet<WebServerType> = new Set(["nginx", "openresty"]);
+const LIVE_CAPABLE: ReadonlySet<WebServerType> = new Set(["nginx", "openresty", "apache2", "lighttpd", "litespeed", "caddy", "traefik"]);
 
 export function WebserverAnalyticsPanel({
   enabled = true,
@@ -99,7 +99,7 @@ export function WebserverAnalyticsPanel({
         {canLive && authToken && (
           <button
             type="button"
-            title="WebSocket ~2.5s updates + log tails (nginx / OpenResty)"
+            title="WebSocket ~2.5s updates + merged vhost logs"
             onClick={() => setLiveOn((v) => !v)}
             className={`flex items-center gap-1 px-2 py-0.5 text-[10px] rounded border ${
               liveOn ? "border-emerald-500/40 text-emerald-400 bg-emerald-500/10" : "border-border text-muted-foreground hover:bg-accent"
@@ -197,10 +197,10 @@ export function WebserverAnalyticsPanel({
             {d.note && (
               <p className="text-xs text-amber-400/90 bg-amber-500/10 border border-amber-500/20 rounded-md px-3 py-2">{d.note}</p>
             )}
-            {serverId === "nginx" && (
+            {scopeEff === "daemon" && (
               <p className="text-[10px] text-muted-foreground leading-relaxed">
-                Totals are from the access log file above. Site vhosts created by HostPanel usually write per-domain logs under{" "}
-                <code className="text-[10px] bg-muted/40 px-1 rounded">/var/log/nginx/&lt;domain&gt;.access.log</code> — use SSH or expand this view later if you need per-site tails.
+                Daemon scope merges the main access log with per-site HostPanel vhost logs for this stack
+                {serverId === "nginx" ? " (including edge proxy *.edge.access.log for non-nginx backends)" : ""}.
               </p>
             )}
 

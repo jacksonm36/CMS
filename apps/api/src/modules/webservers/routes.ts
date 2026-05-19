@@ -13,7 +13,8 @@ import {
 import { buildAccessLogAnalytics } from "./access-log-analytics.js";
 import { runInstallNdjsonStream } from "./install-stream.js";
 import { resolveWebserverLogPath } from "./webserver-log-paths.js";
-import { gatherMergedAccessSample } from "./nginx-access-sample.js";
+import { gatherMergedAccessSample, gatherMergedAccessLogLines } from "./webserver-log-gather.js";
+import { supportsMergedDaemonLogs } from "./webserver-log-dirs.js";
 import { registerWebserverLiveStream } from "./webservers-live-ws.js";
 
 const execAsync = promisify(exec);
@@ -432,12 +433,11 @@ export async function webserversRoutes(app: FastifyInstance) {
     const logPath = resolveWebserverLogPath({ id: ws.id as WebServerType, logType: "access", scope });
     if (!logPath) return reply.status(404).send({ success: false, error: "Unknown web server" });
 
-    const useMerged =
-      scope === "daemon" && (ws.id === "nginx" || ws.id === "openresty");
+    const useMerged = supportsMergedDaemonLogs(ws.id as WebServerType, scope);
     let accessRaw: string;
     let logPathLabel = logPath;
     if (useMerged) {
-      const merged = await gatherMergedAccessSample(ws.id as "nginx" | "openresty", runCmd);
+      const merged = await gatherMergedAccessSample(ws.id as WebServerType, runCmd);
       accessRaw = merged.raw;
       logPathLabel = merged.sourceHint;
     } else {
@@ -458,7 +458,7 @@ export async function webserversRoutes(app: FastifyInstance) {
       data: {
         logPath: logPathLabel,
         scope,
-        sourceHint: useMerged ? "Merged main + per-vhost *.access.log (HostPanel sites log per domain)." : undefined,
+        sourceHint: useMerged ? "Merged main + per-vhost logs for this stack (nginx includes edge proxy logs)." : undefined,
         ...stats,
         note,
       },
@@ -479,6 +479,14 @@ export async function webserversRoutes(app: FastifyInstance) {
 
     const logPath = resolveWebserverLogPath({ id: ws.id as WebServerType, logType, scope });
     if (!logPath) return reply.status(404).send({ success: false, error: "Unknown web server or log type" });
+
+    if (logType === "access" && supportsMergedDaemonLogs(ws.id as WebServerType, scope)) {
+      const merged = await gatherMergedAccessLogLines(ws.id as WebServerType, lines, runCmd);
+      return reply.send({
+        success: true,
+        data: { lines: merged.lines, path: merged.path, scope },
+      });
+    }
 
     const result = await runCmd(`tail -n ${lines} ${logPath} 2>&1`);
     return reply.send({

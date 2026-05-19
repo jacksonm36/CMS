@@ -1,14 +1,5 @@
 import type { WebServerType } from "../sites/webservers/index.js";
-
-const DEFAULT_LOGS: Record<WebServerType, Record<"error" | "access", string>> = {
-  nginx: { error: "/var/log/nginx/error.log", access: "/var/log/nginx/access.log" },
-  apache2: { error: "/var/log/apache2/error.log", access: "/var/log/apache2/access.log" },
-  lighttpd: { error: "/var/log/lighttpd/error.log", access: "/var/log/lighttpd/access.log" },
-  litespeed: { error: "/usr/local/lsws/logs/error.log", access: "/usr/local/lsws/logs/access.log" },
-  caddy: { error: "/var/log/caddy/caddy.log", access: "/var/log/caddy/access.log" },
-  openresty: { error: "/var/log/openresty/error.log", access: "/var/log/openresty/access.log" },
-  traefik: { error: "/var/log/traefik/traefik.log", access: "/var/log/traefik/access.log" },
-};
+import { daemonLogDirForServer, defaultDaemonLogFile } from "./webserver-log-dirs.js";
 
 const ENV_PREFIX: Record<WebServerType, string> = {
   nginx: "NGINX",
@@ -46,5 +37,8 @@ export function resolveWebserverLogPath(opts: {
     if (fromEnv) return fromEnv;
   }
 
-  return DEFAULT_LOGS[id]?.[logType];
+  return defaultDaemonLogFile(id, logType);
 }
+
+/** Re-export for callers that need the directory (e.g. site log hints). */
+export { daemonLogDirForServer };
