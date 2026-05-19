@@ -265,6 +265,7 @@ finish_rootful_ok() {
   maybe_pull_alpine_rootful
   maybe_restart_hostpanel_api
   ok "Docker rootful setup finished."
+  warn "SECURITY: Docker is using the rootful engine (docker group → /var/run/docker.sock). Prefer rootless when possible; limit docker group membership and monitor container workloads."
   exit 0
 }
 

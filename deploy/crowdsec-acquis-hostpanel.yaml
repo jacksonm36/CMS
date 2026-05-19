@@ -1,0 +1,17 @@
+# HostPanel — CrowdSec log acquisition (installed to /etc/crowdsec/acquis.d/hostpanel-weblogs.yaml).
+# CrowdSec runs on the host and reads these paths. When nginx/OpenResty run in Docker, bind-mount
+# the same paths into the container (e.g. -v /var/log/nginx:/var/log/nginx) so logs land on the host.
+---
+poll_without_inotify: true
+filenames:
+  - /var/log/nginx/*.access.log
+  - /var/log/nginx/*.error.log
+labels:
+  type: nginx
+---
+poll_without_inotify: true
+filenames:
+  - /var/log/openresty/*.access.log
+  - /var/log/openresty/*.error.log
+labels:
+  type: nginx

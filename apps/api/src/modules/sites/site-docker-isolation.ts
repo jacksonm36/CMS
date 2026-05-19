@@ -46,8 +46,9 @@ function ensureBaseNetwork(): void {
 /**
  * Create (or reuse) a named group network with ICC ENABLED.
  * Only containers explicitly placed in the same group can communicate.
+ * Exported for template stack deploy (MySQL sidecar + tenant on same bridge).
  */
-function ensureGroupNetwork(group: string): string {
+export function ensureGroupNetwork(group: string): string {
   const net = `${GROUP_PREFIX}${group}`;
   if (spawnSync("docker", ["network", "inspect", net], { encoding: "utf8" }).status !== 0) {
     spawnSync("docker", [

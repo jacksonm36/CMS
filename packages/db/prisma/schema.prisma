@@ -93,6 +93,10 @@ model Site {
   rootPath            String
   webConfigPath       String?
   templateId          String?
+  /// When set, a Docker MySQL/MariaDB stack container was published on this loopback port for host PHP
+  stackDbHostPort     Int?
+  /// Docker container ID for optional per-site MySQL/MariaDB (see SiteTemplate.provisionDockerDb)
+  stackDbContainerId  String?
   createdAt           DateTime    @default(now())
   updatedAt           DateTime    @updatedAt
 
@@ -151,6 +155,12 @@ model SiteTemplate {
   isCentralService Boolean     @default(false)
   /// Default homepage file for sites created from this template (static / PHP)
   defaultDocument  String?
+  /// After site dir exists, auto-run Alpine tenant sidecar + stack packages (Docker required on host)
+  autoDeployIsolation Boolean   @default(false)
+  /// Assign each provisioned site its own `networkGroup` (`site-<siteId>`) so sidecars/DB share one bridge
+  stackNetworkPerSite Boolean   @default(false)
+  /// Spawn MySQL/MariaDB in Docker on the same group network + 127.0.0.1:<port> for host PHP (mysql/mariadb stacks only)
+  provisionDockerDb   Boolean   @default(false)
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @updatedAt
 

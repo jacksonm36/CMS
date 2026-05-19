@@ -178,8 +178,13 @@ export async function contentRoutes(app: FastifyInstance) {
     const data = await request.file();
     if (!data) return reply.status(400).send({ success: false, error: "No file provided" });
 
-    const file = await saveMediaFile(data, request.user.sub);
-    return reply.status(201).send({ success: true, data: file });
+    try {
+      const file = await saveMediaFile(data, request.user.sub);
+      return reply.status(201).send({ success: true, data: file });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Upload rejected";
+      return reply.status(400).send({ success: false, error: msg });
+    }
   });
 
   app.delete("/media/:id", { preHandler: requireAuth }, async (request, reply) => {

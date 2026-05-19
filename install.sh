@@ -82,6 +82,8 @@ HP_DOMAIN="${HP_DOMAIN:-}"
 HP_SKIP_PANEL_HOST_PROMPT="${HP_SKIP_PANEL_HOST_PROMPT:-false}"
 HP_SERVICE_USER="${HP_SERVICE_USER:-hostpanel}"
 HP_SERVICE_HOME="${HP_SERVICE_HOME:-/var/lib/hostpanel}"
+# Comma-separated IPs/CIDRs of reverse proxies that send X-Forwarded-For (nginx real_ip + API trustProxy)
+HP_TRUSTED_PROXY_IPS="${HP_TRUSTED_PROXY_IPS:-}"
 
 REPO_URL="${HP_REPO_URL:-https://github.com/jacksonm36/CMS}"
 REPO_BRANCH="${HP_REPO_BRANCH:-main}"
@@ -391,16 +393,53 @@ if [[ "$HP_CROWDSEC" == "true" ]]; then
       || curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | bash
     $PKG_MGR update -qq 2>/dev/null || true
     pkg_install crowdsec || pkg_install_required crowdsec
-    pkg_install crowdsec-firewall-bouncer-iptables || true
     service_enable_start crowdsec
 
-    # Install community-recommended collections
-    cscli collections install crowdsecurity/linux 2>/dev/null || true
-    cscli collections install crowdsecurity/nginx 2>/dev/null || true
-
-    success "CrowdSec installed with linux + nginx collections"
+    success "CrowdSec installed"
   else
     success "CrowdSec already installed ($(cscli version 2>/dev/null | head -1))"
+    service_enable_start crowdsec 2>/dev/null || true
+  fi
+
+  # Firewall bouncer (iptables+ipset): Debian package ships api_key: ${API_KEY} — must register with cscli and start the unit
+  pkg_install crowdsec-firewall-bouncer-iptables || true
+  CS_FW_YAML="/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
+  if [[ -f "$CS_FW_YAML" ]]; then
+    if grep -qF '${API_KEY}' "$CS_FW_YAML" 2>/dev/null; then
+      if ! systemctl is-active --quiet crowdsec 2>/dev/null; then
+        systemctl start crowdsec 2>/dev/null || true
+        sleep 2
+      fi
+      CS_FW_KEY=$(cscli bouncers add crowdsec-firewall-bouncer -o raw 2>/dev/null || true)
+      if [[ -n "$CS_FW_KEY" ]]; then
+        sed -i "s|^api_key:.*|api_key: ${CS_FW_KEY}|" "$CS_FW_YAML"
+        success "CrowdSec firewall bouncer API key written to crowdsec-firewall-bouncer.yaml"
+      else
+        warn "Could not create firewall bouncer API key — is CrowdSec LAPI up? (systemctl status crowdsec)"
+      fi
+    fi
+    systemctl enable crowdsec-firewall-bouncer 2>/dev/null || true
+    systemctl restart crowdsec-firewall-bouncer 2>/dev/null || systemctl start crowdsec-firewall-bouncer 2>/dev/null || true
+    if systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
+      success "crowdsec-firewall-bouncer is active (iptables/ipset bans)"
+    else
+      warn "crowdsec-firewall-bouncer is not active — journalctl -u crowdsec-firewall-bouncer -n 50 --no-pager"
+    fi
+  else
+    info "crowdsec-firewall-bouncer yaml missing — optional: apt install crowdsec-firewall-bouncer-iptables"
+  fi
+
+  if [[ -n "${HP_CROWDSEC_LAPI_URL:-}" ]]; then
+    step "CrowdSec: enroll log processor + bouncer to remote LAPI"
+    export CROWDSEC_LAPI_URL="${HP_CROWDSEC_LAPI_URL}"
+    export CROWDSEC_LAPI_TOKEN="${HP_CROWDSEC_LAPI_TOKEN:-}"
+    export HOSTPANEL_ENV="${HP_INSTALL_DIR}/.env"
+    export HP_INSTALL_DIR
+    if bash "${HP_INSTALL_DIR}/deploy/enroll-crowdsec-remote-lapi.sh"; then
+      success "CrowdSec enrolled to ${HP_CROWDSEC_LAPI_URL}"
+    else
+      warn "Remote LAPI enroll failed — using local LAPI (127.0.0.1:8080). Fix ${HP_CROWDSEC_LAPI_URL} and run deploy/enroll-crowdsec-remote-lapi.sh"
+    fi
   fi
 
   # Create API bouncer key for HostPanel
@@ -428,6 +467,17 @@ else
     usermod -d "$HP_SERVICE_HOME" "$HP_SERVICE_USER" 2>/dev/null || true
   fi
   success "Linux user '$HP_SERVICE_USER' already exists — refreshed home $HP_SERVICE_HOME"
+fi
+
+# Standard nginx/apache packages on Debian/Ubuntu use root:adm and mode 640 under /var/log — supplementary group "adm" allows tail without sudo.
+if getent group adm >/dev/null 2>&1; then
+  if id -nG "$HP_SERVICE_USER" 2>/dev/null | tr " " "\n" | grep -qx adm; then
+    info "User '$HP_SERVICE_USER' is already in group adm (daemon log tail)"
+  elif usermod -a -G adm "$HP_SERVICE_USER" 2>/dev/null; then
+    info "Added '$HP_SERVICE_USER' to group adm — read /var/log/nginx/*, apache2, etc. Restart API for running processes to pick it up: systemctl restart hostpanel-api"
+  else
+    warn "Could not add '$HP_SERVICE_USER' to group adm — Web server log tail may show Permission denied (fix: sudo usermod -a -G adm $HP_SERVICE_USER)"
+  fi
 fi
 
 # ─── 8. Clone / update HostPanel ──────────────────────────────────────────────
@@ -526,7 +576,7 @@ REDIS_URL="redis://127.0.0.1:6379"
 
 CS_KEY_FOR_ENV="${CS_API_KEY:-}"
 
-# NEXTAUTH_URL + CORS_ORIGIN must match the URL users open in the browser.
+# NEXTAUTH_URL + CORS_ORIGIN should match the URL users open in the browser (the API also unions their origins for CORS).
 # WebAuthn: rpID must be a domain and a suffix of the request host — for IPv4 we use nip.io
 # so the panel URL and rpID stay aligned (open http://192-168-0-1.nip.io:3000 not the raw IP).
 HP_SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || echo '127.0.0.1')"
@@ -606,6 +656,7 @@ ACME_WEBROOT="/var/www"
 
 # ─── Web servers ────────────────────────────────────────────────────────────────
 NGINX_SITES_DIR="${HP_SERVICE_HOME}/nginx-sites"
+HOSTPANEL_TRUSTED_PROXY_IPS="${HP_TRUSTED_PROXY_IPS}"
 APACHE_SITES_DIR="/etc/apache2/sites-enabled"
 LIGHTTPD_CONF_DIR="/etc/lighttpd/conf-enabled"
 LSWS_VHOSTS_DIR="/usr/local/lsws/conf/vhosts"
@@ -853,13 +904,18 @@ server {
         proxy_cache_bypass \$http_upgrade;
     }
 
-    # Proxy to API
+    # Proxy to API (Upgrade headers required for WebSocket terminals under /api/)
     location /api/ {
         proxy_pass http://127.0.0.1:${HP_API_PORT};
         proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'upgrade';
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_cache_bypass \$http_upgrade;
+        proxy_read_timeout 86400;
     }
 
     access_log /var/log/nginx/hostpanel.access.log;
@@ -869,6 +925,44 @@ VHOST
 
   nginx -t && nginx -s reload
   success "Nginx vhost configured for ${HP_BROWSER_HOST}"
+fi
+
+if [[ "$HP_WEBSERVER" == "nginx" && -n "${HP_TRUSTED_PROXY_IPS:-}" && -f "${HP_INSTALL_DIR}/scripts/apply-nginx-trusted-proxy.sh" ]]; then
+  step "Nginx trusted proxy (real client IP): ${HP_TRUSTED_PROXY_IPS}"
+  chmod +x "${HP_INSTALL_DIR}/scripts/apply-nginx-trusted-proxy.sh"
+  bash "${HP_INSTALL_DIR}/scripts/apply-nginx-trusted-proxy.sh" "$HP_INSTALL_DIR/.env"
+  success "Nginx real_ip configured for trusted proxies"
+fi
+
+# ─── 13a. CrowdSec: HostPanel + managed site web logs on host (Docker: bind-mount these paths) ─
+if [[ "$HP_CROWDSEC" == "true" ]] && command -v cscli &>/dev/null \
+  && [[ -f "${HP_INSTALL_DIR}/deploy/crowdsec-acquis-hostpanel.yaml" ]]; then
+  step "CrowdSec: acquiring HostPanel / nginx / OpenResty log files"
+  install -m 0644 "${HP_INSTALL_DIR}/deploy/crowdsec-acquis-hostpanel.yaml" \
+    /etc/crowdsec/acquis.d/hostpanel-weblogs.yaml
+  if [[ -f "${HP_INSTALL_DIR}/deploy/crowdsec-acquis-nodejs.yaml" ]]; then
+    install -m 0644 "${HP_INSTALL_DIR}/deploy/crowdsec-acquis-nodejs.yaml" \
+      /etc/crowdsec/acquis.d/hostpanel-nodejs.yaml
+  fi
+  if getent passwd crowdsec &>/dev/null; then
+    usermod -a -G adm crowdsec 2>/dev/null || true
+    usermod -a -G www-data crowdsec 2>/dev/null || true
+  fi
+  chmod 0755 /var/log/nginx 2>/dev/null || true
+  mkdir -p /var/log/openresty
+  chmod 0755 /var/log/openresty 2>/dev/null || true
+  systemctl reload crowdsec 2>/dev/null || systemctl restart crowdsec 2>/dev/null || true
+  info "CrowdSec tails /var/log/nginx/*.log (includes hostpanel.* + site vhosts). For containerized nginx, mount: -v /var/log/nginx:/var/log/nginx"
+  success "CrowdSec log acquisition updated"
+fi
+
+if [[ "$HP_CROWDSEC" == "true" ]] && command -v cscli &>/dev/null \
+  && [[ -x "${HP_INSTALL_DIR}/deploy/ensure-crowdsec-hub.sh" ]]; then
+  step "CrowdSec: install hub parsers and scenarios"
+  export HP_INSTALL_DIR
+  bash "${HP_INSTALL_DIR}/deploy/ensure-crowdsec-hub.sh" \
+    && success "CrowdSec hub collections, parsers, and scenarios installed" \
+    || warn "CrowdSec hub install had warnings — re-run: sudo bash ${HP_INSTALL_DIR}/deploy/ensure-crowdsec-hub.sh"
 fi
 
 # ─── 13b. Fail2ban (SSH / brute-force) ──────────────────────────────────────
@@ -944,8 +1038,10 @@ echo -e "    hostpanel-api : $(systemctl is-active hostpanel-api 2>/dev/null || 
 echo -e "    hostpanel-web : $(systemctl is-active hostpanel-web 2>/dev/null || echo 'unknown')"
 echo -e "    postgresql    : $(systemctl is-active postgresql 2>/dev/null || echo 'unknown')"
 echo -e "    redis         : $(systemctl is-active redis-server 2>/dev/null || echo 'unknown')"
-[[ "$HP_CROWDSEC" == "true" ]] && \
-echo -e "    crowdsec      : $(systemctl is-active crowdsec 2>/dev/null || echo 'unknown')"
+[[ "$HP_CROWDSEC" == "true" ]] && {
+  echo -e "    crowdsec                    : $(systemctl is-active crowdsec 2>/dev/null || echo 'unknown')"
+  echo -e "    crowdsec-firewall-bouncer  : $(systemctl is-active crowdsec-firewall-bouncer 2>/dev/null || echo 'unknown')"
+}
 if [[ "$HP_SKIP_DOCKER" != "true" && "$HP_DOCKER_ROOTLESS" == "true" ]]; then
   if grep -q '^DOCKER_HOST=' "${HP_INSTALL_DIR}/.env" 2>/dev/null; then
     echo -e "    docker          : ${GREEN}configured${NC} (DOCKER_HOST in .env — see deploy/hostpanel-docker-rootless.sh)"

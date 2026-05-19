@@ -8,7 +8,7 @@ function escapeCaddy(s: string): string {
   return s.replace(/`/g, "\\`");
 }
 
-export function generateConfig(site: Site): string {
+export function generateConfig(site: Site, _extras?: import("./index.js").SiteWebConfigExtras): string {
   const root = escapeCaddy(site.rootPath);
   const dom = escapeCaddy(site.domain);
   const phpSock = `/run/php/php${site.phpVersion ?? "8.2"}-fpm.sock`;

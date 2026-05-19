@@ -14,6 +14,7 @@ import { prisma } from "@hostpanel/db";
 import type { Role } from "@hostpanel/types";
 import { recordFailedLogin, clearFailedLogins, isLoginIdentifierThrottled, recordLoginIdentifierFailure, clearLoginIdentifierAttempts } from "../../middleware/ipBlock.js";
 import { getRedis } from "../../lib/redis.js";
+import { consumeLoginIdentifierBudget } from "../../lib/login-identifier-rate-limit.js";
 import { requireAuth, requireRole, signSqlEditorElevationToken } from "../../lib/auth.js";
 import { HP_TOKEN_COOKIE } from "../../lib/ws-auth.js";
 import { getRpConfig } from "./passkey.js";
@@ -117,6 +118,15 @@ export async function authRoutes(app: FastifyInstance) {
     }
 
     const { login, password, totpCode } = body.data;
+
+    const loginBudget = await consumeLoginIdentifierBudget(login);
+    if (!loginBudget.ok) {
+      await bcryptCompareOrDummy(password, null);
+      return reply.status(429).send({
+        success: false,
+        error: "Too many login attempts for this sign-in name. Try again in a minute.",
+      });
+    }
 
     if (await isLoginIdentifierThrottled(login)) {
       await bcryptCompareOrDummy(password, null);

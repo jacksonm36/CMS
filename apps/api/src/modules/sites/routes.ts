@@ -33,28 +33,13 @@ import {
   alpinePackagesForStack,
   provisionSidecarPackages,
   portArgsForSite,
-  getDockerUsedPorts,
   PORT_ALLOC_START,
   PORT_ALLOC_END,
 } from "./site-docker-isolation.js";
 import { requireSiteIsolationDeploy, requireSiteReadForIsolation } from "../../lib/site-isolation-deploy.js";
 import { assertSafeCronCommand, CRON_COMMAND_MAX_LEN } from "../../lib/security-env.js";
-
-/** Allocate the first available port in the configured range. */
-async function allocatePort(): Promise<number | null> {
-  const rows = await prisma.site.findMany({
-    where: { appProxyPort: { not: null } },
-    select: { appProxyPort: true },
-  });
-  const used = new Set<number>([
-    ...rows.map((r) => r.appProxyPort as number),
-    ...getDockerUsedPorts(),
-  ]);
-  for (let p = PORT_ALLOC_START; p <= PORT_ALLOC_END; p++) {
-    if (!used.has(p)) return p;
-  }
-  return null;
-}
+import { allocateHostPanelLoopbackPort } from "./port-allocate.js";
+import { deployInfrastructureForTemplatedSite, teardownStackContainers } from "./site-template-stack-deploy.js";
 
 /** True for site types that need an app port for the reverse proxy. */
 function typeNeedsPort(type: string): boolean {
@@ -170,7 +155,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     // Auto-assign port if the template doesn't specify one
     let appProxyPort = tpl.appProxyPort;
     if (!appProxyPort && typeNeedsPort(tpl.type)) {
-      const allocated = await allocatePort();
+      const allocated = await allocateHostPanelLoopbackPort();
       if (!allocated) return reply.status(503).send({ success: false, error: `Port range ${PORT_ALLOC_START}–${PORT_ALLOC_END} exhausted` });
       appProxyPort = allocated;
     }
@@ -201,14 +186,21 @@ export async function sitesRoutes(app: FastifyInstance) {
       },
     });
 
-    provisionSiteDir(site.rootPath).catch(console.error);
-    writeSiteConfig(site)
+    const deployResult = await deployInfrastructureForTemplatedSite(site, tpl);
+    const fresh = await prisma.site.findUnique({ where: { id: site.id } });
+    if (!fresh) {
+      return reply.status(500).send({ success: false, error: "Site row missing after provision" });
+    }
+
+    writeSiteConfig(fresh)
       .then((configPath) => prisma.site.update({ where: { id: site.id }, data: { webConfigPath: configPath } }))
-      .then(() => reloadWebServer(site.webServer as WebServerType))
+      .then(() => reloadWebServer(fresh.webServer as WebServerType))
       .then(() => prisma.site.update({ where: { id: site.id }, data: { status: "active" } }))
       .catch(console.error);
 
-    return reply.status(201).send({ success: true, data: site });
+    return reply
+      .status(201)
+      .send({ success: true, data: fresh, deployWarnings: deployResult.warnings });
   });
 
   // GET /api/sites/network-groups — list distinct group names for UI dropdowns
@@ -254,7 +246,7 @@ export async function sitesRoutes(app: FastifyInstance) {
 
     // Auto-assign a conflict-free port for app types
     if (!appProxyPort && typeNeedsPort(type)) {
-      const allocated = await allocatePort();
+      const allocated = await allocateHostPanelLoopbackPort();
       if (!allocated) return reply.status(503).send({ success: false, error: `Port range ${PORT_ALLOC_START}–${PORT_ALLOC_END} exhausted` });
       appProxyPort = allocated;
     }
@@ -575,6 +567,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     const site = await prisma.site.findUnique({ where: { id } });
     if (!site) return reply.status(404).send({ success: false, error: "Site not found" });
 
+    teardownStackContainers(id);
     removeAlpineSidecar(id, site.dockerContainerId);
 
     await prisma.site.delete({ where: { id } });
@@ -691,6 +684,190 @@ export async function sitesRoutes(app: FastifyInstance) {
       throw e;
     }
     return reply.send({ success: true, message: "File saved" });
+  });
+
+  // DELETE /api/sites/:id/files?path=/page.html
+  app.delete("/:id/files", { preHandler: requireAuth }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const query = request.query as { path?: string };
+    if (!query.path?.trim()) {
+      return reply.status(400).send({ success: false, error: "path is required" });
+    }
+    const { deleteFile } = await import("./files.js");
+    const { pruneRoutesAfterDelete } = await import("./site-pages.js");
+    const site = await prisma.site.findUnique({ where: { id } });
+    if (!site) return reply.status(404).send({ success: false, error: "Site not found" });
+    const { sub, role } = request.user as { sub: string; role: Role };
+    if (!canAccessSite(role, sub, site.ownerId)) {
+      return reply.status(403).send({ success: false, error: "Forbidden" });
+    }
+    try {
+      const kind = await deleteFile(site.rootPath, query.path);
+      const routesChanged = await pruneRoutesAfterDelete(site.rootPath, query.path);
+      if (routesChanged) {
+        await writeSiteConfig(site);
+        await reloadWebServer(site.webServer as WebServerType).catch(() => {});
+      }
+      return reply.send({
+        success: true,
+        message: kind === "directory" ? "Folder deleted" : "File deleted",
+        data: { kind, routesUpdated: routesChanged },
+      });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return reply.status(400).send({ success: false, error: msg });
+    }
+  });
+
+  // GET /api/sites/:id/pages — extra pages & redirects for this site
+  app.get("/:id/pages", { preHandler: requireAuth }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const site = await prisma.site.findUnique({ where: { id } });
+    if (!site) return reply.status(404).send({ success: false, error: "Site not found" });
+    const { sub, role } = request.user as { sub: string; role: Role };
+    if (!canAccessSite(role, sub, site.ownerId)) {
+      return reply.status(403).send({ success: false, error: "Forbidden" });
+    }
+    const { readSiteRoutes, discoverHtmlPages } = await import("./site-pages.js");
+    const routes = await readSiteRoutes(site.rootPath);
+    const discovered = await discoverHtmlPages(site.rootPath);
+    return reply.send({
+      success: true,
+      data: { domain: site.domain, routes: routes.routes, discovered },
+    });
+  });
+
+  const pageOpSchema = z.discriminatedUnion("op", [
+    z.object({
+      op: z.literal("add_page"),
+      slug: z.string().min(1).max(63),
+      title: z.string().max(120).optional(),
+      /** Link an existing file instead of creating /slug/index.html */
+      file: z.string().max(512).optional(),
+    }),
+    z.object({
+      op: z.literal("shortcut"),
+      /** @deprecated Prefer migrate_page — nginx redirect from /slug to flat file */
+      slug: z.string().min(1).max(63),
+      file: z.string().min(1).max(512),
+    }),
+    z.object({
+      op: z.literal("migrate_page"),
+      slug: z.string().min(1).max(63),
+      file: z.string().min(1).max(512),
+    }),
+    z.object({
+      op: z.literal("remove_page"),
+      slug: z.string().min(1).max(63),
+    }),
+    z.object({
+      op: z.literal("add_redirect"),
+      from: z.string().min(1).max(200),
+      to: z.string().min(1).max(500),
+      permanent: z.boolean().optional(),
+    }),
+    z.object({
+      op: z.literal("remove_redirect"),
+      from: z.string().min(1).max(200),
+    }),
+  ]);
+
+  // POST /api/sites/:id/pages — add/remove pages or redirects; reloads web server config
+  app.post("/:id/pages", { preHandler: requireAuth }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = pageOpSchema.safeParse(request.body);
+    if (!body.success) return reply.status(400).send({ success: false, error: body.error.message });
+
+    const site = await prisma.site.findUnique({ where: { id } });
+    if (!site) return reply.status(404).send({ success: false, error: "Site not found" });
+    const { sub, role } = request.user as { sub: string; role: Role };
+    if (!canAccessSite(role, sub, site.ownerId)) {
+      return reply.status(403).send({ success: false, error: "Forbidden" });
+    }
+
+    const {
+      readSiteRoutes,
+      writeSiteRoutes,
+      normalizeSlug,
+      normalizeRedirectPath,
+      resolveOrCreatePageFile,
+      migrateRootHtmlToPageFolder,
+    } = await import("./site-pages.js");
+
+    const cfg = await readSiteRoutes(site.rootPath);
+
+    if (body.data.op === "add_page") {
+      const slug = normalizeSlug(body.data.slug);
+      if (!slug) {
+        return reply.status(400).send({ success: false, error: "Invalid page name (letters, numbers, hyphens only)" });
+      }
+      let file: string;
+      if (body.data.file?.trim()) {
+        file = body.data.file.trim().startsWith("/")
+          ? body.data.file.trim()
+          : `/${body.data.file.trim()}`;
+      } else {
+        file = await resolveOrCreatePageFile(site.rootPath, slug, body.data.title);
+      }
+      cfg.routes = cfg.routes.filter(
+        (r) => !(r.type === "page" && r.slug === slug) && !(r.type === "redirect" && r.from === `/${slug}`),
+      );
+      cfg.routes.push({
+        type: "page",
+        slug,
+        file,
+        title: body.data.title?.trim() || slug,
+      });
+    } else if (body.data.op === "migrate_page") {
+      const slug = normalizeSlug(body.data.slug);
+      if (!slug) return reply.status(400).send({ success: false, error: "Invalid page name" });
+      const file = body.data.file.startsWith("/") ? body.data.file : `/${body.data.file}`;
+      const dest = await migrateRootHtmlToPageFolder(site.rootPath, slug, file);
+      cfg.routes = cfg.routes.filter(
+        (r) => !(r.type === "page" && r.slug === slug) && !(r.type === "redirect" && r.from === `/${slug}`),
+      );
+      cfg.routes.push({
+        type: "page",
+        slug,
+        file: dest,
+        title: slug.charAt(0).toUpperCase() + slug.slice(1),
+      });
+    } else if (body.data.op === "shortcut") {
+      const slug = normalizeSlug(body.data.slug);
+      if (!slug) return reply.status(400).send({ success: false, error: "Invalid page name" });
+      const file = body.data.file.startsWith("/") ? body.data.file : `/${body.data.file}`;
+      const to = file.endsWith(".html") || file.endsWith(".htm") ? file : file;
+      const from = `/${slug}`;
+      cfg.routes = cfg.routes.filter((r) => !(r.type === "redirect" && r.from === from));
+      cfg.routes.push({ type: "redirect", from, to, permanent: true });
+    } else if (body.data.op === "remove_page") {
+      const slug = normalizeSlug(body.data.slug);
+      if (!slug) return reply.status(400).send({ success: false, error: "Invalid slug" });
+      cfg.routes = cfg.routes.filter((r) => !(r.type === "page" && r.slug === slug));
+    } else if (body.data.op === "add_redirect") {
+      const from = normalizeRedirectPath(body.data.from);
+      const to = normalizeRedirectPath(body.data.to);
+      if (!from || !to) {
+        return reply.status(400).send({ success: false, error: "Invalid redirect paths" });
+      }
+      cfg.routes = cfg.routes.filter((r) => !(r.type === "redirect" && r.from === from));
+      cfg.routes.push({
+        type: "redirect",
+        from,
+        to,
+        permanent: body.data.permanent !== false,
+      });
+    } else {
+      const from = normalizeRedirectPath(body.data.from);
+      if (!from) return reply.status(400).send({ success: false, error: "Invalid path" });
+      cfg.routes = cfg.routes.filter((r) => !(r.type === "redirect" && r.from === from));
+    }
+
+    await writeSiteRoutes(site.rootPath, cfg);
+    await writeSiteConfig(site);
+    await reloadWebServer(site.webServer as WebServerType).catch(() => {});
+
+    return reply.send({ success: true, data: { routes: cfg.routes } });
   });
 
   // ─── Databases ────────────────────────────────────────────────────────────

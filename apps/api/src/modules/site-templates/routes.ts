@@ -30,6 +30,12 @@ const templateFields = z.object({
   isCentralService: z.boolean().optional().default(false),
   /** Default homepage filename for static / PHP sites from this template */
   defaultDocument: z.string().max(260).optional().nullable(),
+  /** Auto-provision Alpine tenant sidecar (+ optional Docker DB) when creating a site from this template */
+  autoDeployIsolation: z.boolean().optional().default(false),
+  /** Give each provisioned site its own Docker bridge (`site-<siteId>`) so app + DB containers can talk */
+  stackNetworkPerSite: z.boolean().optional().default(false),
+  /** With autoDeployIsolation: run MySQL/MariaDB in Docker on the same bridge; host PHP uses 127.0.0.1:<port> */
+  provisionDockerDb: z.boolean().optional().default(false),
 });
 
 function refineTraefikTemplate<T extends { webServer?: unknown; type?: unknown }>(data: T, ctx: z.RefinementCtx): void {
@@ -42,9 +48,33 @@ function refineTraefikTemplate<T extends { webServer?: unknown; type?: unknown }
   }
 }
 
-const templateBody = templateFields.superRefine(refineTraefikTemplate);
+function refineTemplateDeployFlags<
+  T extends { provisionDockerDb?: boolean | undefined; autoDeployIsolation?: boolean | undefined; dbStackVersion?: string | null },
+>(data: T, ctx: z.RefinementCtx): void {
+  if (data.provisionDockerDb) {
+    if (!data.autoDeployIsolation) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "provisionDockerDb requires autoDeployIsolation to be enabled.",
+        path: ["provisionDockerDb"],
+      });
+    }
+    const d = data.dbStackVersion ?? "";
+    if (!d.startsWith("mysql") && !d.startsWith("mariadb")) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "provisionDockerDb requires dbStackVersion mysql-* or mariadb-*.",
+        path: ["dbStackVersion"],
+      });
+    }
+  }
+}
 
-const patchTemplateBody = templateFields.partial().superRefine(refineTraefikTemplate);
+const templateFieldsRefined = templateFields.superRefine(refineTraefikTemplate).superRefine(refineTemplateDeployFlags);
+
+const templateBody = templateFieldsRefined;
+
+const patchTemplateBody = templateFields.partial().superRefine(refineTraefikTemplate).superRefine(refineTemplateDeployFlags);
 
 export async function siteTemplatesRoutes(app: FastifyInstance): Promise<void> {
   app.get("/", { preHandler: requireRole("superadmin", "admin") }, async (_request, reply) => {

@@ -181,33 +181,6 @@ export async function dockerRemove(
   }
 }
 
-export async function dockerLogs(
-  containerRef: string,
-  tailLines: number,
-  refMode: DockerContainerRefMode
-): Promise<{ ok: true; logs: string } | { ok: false; error: string }> {
-  if (!isValidDockerContainerRef(containerRef, refMode)) {
-    return { ok: false, error: "Invalid container reference" };
-  }
-  const tail = Math.min(Math.max(Math.floor(tailLines), 1), 2000);
-  try {
-    const { stdout, stderr } = await execFileAsync(
-      "docker",
-      ["logs", "--tail", String(tail), "--timestamps", containerRef],
-      {
-        env: process.env,
-        maxBuffer: 16 * 1024 * 1024,
-        timeout: 60_000,
-      }
-    );
-    const combined = [stdout, stderr].filter(Boolean).join("\n");
-    return { ok: true, logs: combined.trimEnd() || "(no log output)" };
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return { ok: false, error: msg };
-  }
-}
-
 export type DockerPortBinding = {
   /** Container port + protocol, e.g. "80/tcp" */
   containerPort: string;
@@ -304,6 +277,60 @@ export async function dockerInspect(
     };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/** When `docker logs` is empty (common for idle keepalives like `sleep infinity`). */
+function formatDockerLogsFallback(data: DockerInspectResult): string {
+  const cmd = data.cmd.length ? data.cmd.join(" ") : "—";
+  const role = data.labels["hostpanel.role"]?.trim();
+  const lines = [
+    "[HostPanel] Docker has no stdout/stderr lines in this window yet. That is normal when the main process is idle (for example `sleep infinity`) or does not write to the container log stream.",
+    "",
+    `Container: ${data.name || data.id.slice(0, 12)}`,
+    `Image: ${data.image}`,
+    `Command: ${cmd}`,
+    `Network: ${data.networkMode}`,
+    `Restart: ${data.restartPolicy}`,
+  ];
+  if (role) lines.push(`Label hostpanel.role: ${role}`);
+  if (data.isSidecar) {
+    lines.push(
+      "",
+      "This is a HostPanel site isolation sidecar (workspace under /srv on the host). Use Shell for an interactive session; HTTP for the site is served by host nginx, not inside this container."
+    );
+  }
+  return lines.join("\n");
+}
+
+export async function dockerLogs(
+  containerRef: string,
+  tailLines: number,
+  refMode: DockerContainerRefMode
+): Promise<{ ok: true; logs: string } | { ok: false; error: string }> {
+  if (!isValidDockerContainerRef(containerRef, refMode)) {
+    return { ok: false, error: "Invalid container reference" };
+  }
+  const tail = Math.min(Math.max(Math.floor(tailLines), 1), 2000);
+  try {
+    const { stdout, stderr } = await execFileAsync(
+      "docker",
+      ["logs", "--tail", String(tail), "--timestamps", containerRef],
+      {
+        env: process.env,
+        maxBuffer: 16 * 1024 * 1024,
+        timeout: 60_000,
+      }
+    );
+    const combined = [stdout, stderr].filter(Boolean).join("\n");
+    const trimmed = combined.trimEnd();
+    if (trimmed) return { ok: true, logs: trimmed };
+    const ins = await dockerInspect(containerRef, refMode);
+    if (ins.ok) return { ok: true, logs: formatDockerLogsFallback(ins.data) };
+    return { ok: true, logs: `(no log output; could not inspect container: ${ins.error})` };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, error: msg };
   }
 }
 

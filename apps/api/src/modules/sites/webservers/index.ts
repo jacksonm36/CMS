@@ -1,6 +1,7 @@
 import { writeFile, unlink, mkdir } from "fs/promises";
 import { dirname } from "path";
 import type { Site } from "@hostpanel/db";
+import type { SiteRoutesFile } from "../site-pages.js";
 
 /** Single source for types, Zod, and UI enumerations */
 export const WEB_SERVER_IDS = [
@@ -15,8 +16,10 @@ export const WEB_SERVER_IDS = [
 
 export type WebServerType = (typeof WEB_SERVER_IDS)[number];
 
+export type SiteWebConfigExtras = { routes: SiteRoutesFile };
+
 export interface WebServerDriver {
-  generateConfig(site: Site): string;
+  generateConfig(site: Site, extras?: SiteWebConfigExtras): string;
   configPath(domain: string): string;
   reload(): Promise<void>;
 }
@@ -36,7 +39,9 @@ async function getDriver(ws: WebServerType): Promise<WebServerDriver> {
 
 export async function writeSiteConfig(site: Site): Promise<string> {
   const driver = await getDriver(site.webServer as WebServerType);
-  const config = driver.generateConfig(site);
+  const { readSiteRoutes } = await import("../site-pages.js");
+  const routes = await readSiteRoutes(site.rootPath);
+  const config = driver.generateConfig(site, { routes });
   const path = driver.configPath(site.domain);
 
   try {

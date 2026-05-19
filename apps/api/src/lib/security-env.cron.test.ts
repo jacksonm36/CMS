@@ -1,30 +1,30 @@
-import { test } from "node:test";
-import assert from "node:assert/strict";
+import { describe, it, expect } from "vitest";
 import { assertSafeCronCommand } from "./security-env.js";
 
-test("allows typical script invocations", () => {
-  assert.equal(assertSafeCronCommand("/usr/bin/php /var/www/x/cron.php").ok, true);
-  assert.equal(assertSafeCronCommand("node /var/www/app/dist/job.js").ok, true);
-});
+describe("cron command policy", () => {
+  it("allows typical script invocations", () => {
+    expect(assertSafeCronCommand("/usr/bin/php /var/www/x/cron.php").ok).toBe(true);
+    expect(assertSafeCronCommand("node /var/www/app/dist/job.js").ok).toBe(true);
+  });
 
-test("denies sudo and package managers by default", () => {
-  assert.equal(assertSafeCronCommand("sudo apt-get install evil").ok, false);
-  assert.equal(assertSafeCronCommand("sudo -n /usr/bin/apt-get update").ok, false);
-  assert.equal(assertSafeCronCommand("/usr/bin/apt install curl").ok, false);
-  assert.equal(assertSafeCronCommand("dpkg -i ./x.deb").ok, false);
-  assert.equal(assertSafeCronCommand("systemctl start nginx").ok, false);
-  assert.equal(assertSafeCronCommand("doas id").ok, false);
-});
+  it("denies sudo and package managers by default", () => {
+    expect(assertSafeCronCommand("sudo apt-get install evil").ok).toBe(false);
+    expect(assertSafeCronCommand("sudo -n /usr/bin/apt-get update").ok).toBe(false);
+    expect(assertSafeCronCommand("/usr/bin/apt install curl").ok).toBe(false);
+    expect(assertSafeCronCommand("dpkg -i ./x.deb").ok).toBe(false);
+    expect(assertSafeCronCommand("systemctl start nginx").ok).toBe(false);
+    expect(assertSafeCronCommand("doas id").ok).toBe(false);
+  });
 
-test("HOSTPANEL_CRON_ALLOW_PRIVILEGED_COMMANDS relaxes privileged gate only", () => {
-  const prev = process.env.HOSTPANEL_CRON_ALLOW_PRIVILEGED_COMMANDS;
-  process.env.HOSTPANEL_CRON_ALLOW_PRIVILEGED_COMMANDS = "true";
-  try {
-    const r = assertSafeCronCommand("sudo apt-get update");
-    assert.equal(r.ok, true);
-    assert.equal(assertSafeCronCommand("").ok, false);
-    assert.equal(assertSafeCronCommand("foo\nbar").ok, false);
-  } finally {
-    process.env.HOSTPANEL_CRON_ALLOW_PRIVILEGED_COMMANDS = prev;
-  }
+  it("HOSTPANEL_CRON_ALLOW_PRIVILEGED_COMMANDS relaxes privileged gate only", () => {
+    const prev = process.env.HOSTPANEL_CRON_ALLOW_PRIVILEGED_COMMANDS;
+    process.env.HOSTPANEL_CRON_ALLOW_PRIVILEGED_COMMANDS = "true";
+    try {
+      expect(assertSafeCronCommand("sudo apt-get update").ok).toBe(true);
+      expect(assertSafeCronCommand("").ok).toBe(false);
+      expect(assertSafeCronCommand("foo\nbar").ok).toBe(false);
+    } finally {
+      process.env.HOSTPANEL_CRON_ALLOW_PRIVILEGED_COMMANDS = prev;
+    }
+  });
 });

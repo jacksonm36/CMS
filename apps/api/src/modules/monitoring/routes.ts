@@ -4,6 +4,7 @@ import { prisma } from "@hostpanel/db";
 import { requireRole } from "../../lib/auth.js";
 import { verifyWsJwt } from "../../lib/ws-auth.js";
 import { getSystemMetrics, getMetricsHistory } from "./metrics.js";
+import { normalizeProbeTarget, probeUrl } from "./probe.js";
 
 const uptimeCheckSchema = z.object({
   name: z.string().min(1),
@@ -46,14 +47,21 @@ export async function monitoringRoutes(app: FastifyInstance) {
       return;
     }
 
-    const interval = setInterval(async () => {
+    const period = Math.min(10_000, Math.max(1000, Number(process.env.HOSTPANEL_METRICS_STREAM_MS ?? 2000)));
+
+    const push = async () => {
       try {
         const metrics = await getSystemMetrics();
         socket.send(JSON.stringify(metrics));
       } catch {
         socket.close();
       }
-    }, 5000);
+    };
+
+    await push();
+    const interval = setInterval(() => {
+      void push();
+    }, period);
 
     socket.on("close", () => clearInterval(interval));
   });
@@ -100,6 +108,70 @@ export async function monitoringRoutes(app: FastifyInstance) {
     });
     return reply.send({ success: true, data: results });
   });
+
+  function isAllowedPublicProbeHostname(hostname: string): boolean {
+    const h = hostname.toLowerCase();
+    if (h === "gamedns.hu") return true;
+    if (!h.endsWith(".gamedns.hu")) return false;
+    return h.length > ".gamedns.hu".length;
+  }
+
+  function isAllowedProbeOrigin(origin: string): boolean {
+    try {
+      const h = new URL(origin).hostname.toLowerCase();
+      return h === "gamedns.hu" || (h.endsWith(".gamedns.hu") && h.length > ".gamedns.hu".length);
+    } catch {
+      return false;
+    }
+  }
+
+  function applyPublicProbeCors(request: { headers: { origin?: string } }, reply: { header: (k: string, v: string) => void }) {
+    const origin = request.headers.origin;
+    if (!origin || !isAllowedProbeOrigin(origin)) return;
+    reply.header("Access-Control-Allow-Origin", origin);
+    reply.header("Vary", "Origin");
+  }
+
+  app.options("/public-probe", async (request, reply) => {
+    applyPublicProbeCors(request, reply);
+    reply.header("Access-Control-Allow-Methods", "GET, OPTIONS");
+    reply.header("Access-Control-Allow-Headers", "Content-Type");
+    return reply.status(204).send();
+  });
+
+  /** Public uptime probe for static site dashboards (CORS + SSRF-safe). */
+  app.get(
+    "/public-probe",
+    {
+      config: {
+        rateLimit: {
+          max: Number(process.env.HOSTPANEL_PUBLIC_PROBE_RATE_LIMIT_MAX ?? 30),
+          timeWindow: "1 minute",
+        },
+      },
+    },
+    async (request, reply) => {
+      applyPublicProbeCors(request, reply);
+      const query = request.query as { url?: string };
+      if (!query.url?.trim()) {
+        return reply.status(400).send({ success: false, error: "url query parameter is required" });
+      }
+      if (query.url.length > 2048) {
+        return reply.status(400).send({ success: false, error: "url is too long" });
+      }
+      try {
+        const target = normalizeProbeTarget(query.url);
+        const parsed = new URL(target);
+        if (!isAllowedPublicProbeHostname(parsed.hostname)) {
+          return reply.status(400).send({ success: false, error: "Invalid or disallowed URL" });
+        }
+        const result = await probeUrl(target, 10_000);
+        return reply.send({ success: true, data: result });
+      } catch {
+        return reply.status(400).send({ success: false, error: "Invalid or disallowed URL" });
+      }
+    },
+  );
 
   // ─── Alert Rules ──────────────────────────────────────────────────────────
 

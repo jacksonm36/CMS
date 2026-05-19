@@ -22,6 +22,9 @@ type SiteTemplateRow = {
   networkGroup: string | null;
   isCentralService: boolean;
   defaultDocument: string | null;
+  autoDeployIsolation: boolean;
+  stackNetworkPerSite: boolean;
+  provisionDockerDb: boolean;
 };
 
 type TemplateForm = {
@@ -38,6 +41,9 @@ type TemplateForm = {
   networkGroup: string;
   isCentralService: boolean;
   defaultDocument: string;
+  autoDeployIsolation: boolean;
+  stackNetworkPerSite: boolean;
+  provisionDockerDb: boolean;
 };
 
 const emptyForm = (): TemplateForm => ({
@@ -54,6 +60,9 @@ const emptyForm = (): TemplateForm => ({
   networkGroup: "",
   isCentralService: false,
   defaultDocument: "",
+  autoDeployIsolation: false,
+  stackNetworkPerSite: false,
+  provisionDockerDb: false,
 });
 
 function templateToForm(t: SiteTemplateRow): TemplateForm {
@@ -71,6 +80,9 @@ function templateToForm(t: SiteTemplateRow): TemplateForm {
     networkGroup: t.networkGroup ?? "",
     isCentralService: t.isCentralService ?? false,
     defaultDocument: t.defaultDocument ?? "",
+    autoDeployIsolation: t.autoDeployIsolation ?? false,
+    stackNetworkPerSite: t.stackNetworkPerSite ?? false,
+    provisionDockerDb: t.provisionDockerDb ?? false,
   };
 }
 
@@ -97,6 +109,9 @@ function buildPayload(form: TemplateForm) {
     networkGroup: form.networkGroup.trim() || null,
     isCentralService: form.isCentralService,
     defaultDocument: homepage,
+    autoDeployIsolation: form.autoDeployIsolation,
+    stackNetworkPerSite: form.stackNetworkPerSite,
+    provisionDockerDb: form.provisionDockerDb,
   };
 }
 
@@ -319,6 +334,46 @@ function TemplateFormFields({
         </div>
       </div>
 
+      <div className="rounded-lg border border-border bg-secondary/10 p-4 space-y-3">
+        <p className="text-sm font-medium">Template deploy (Docker on host)</p>
+        <p className="text-xs text-muted-foreground leading-relaxed">
+          When staff creates a site from this template, HostPanel can provision a per-site Docker bridge, Alpine
+          sidecar (same bind-mount as <code className="text-[10px]">/var/www</code>), and optionally a MySQL/MariaDB
+          container on that bridge with a loopback port for host PHP-FPM. Requires Docker and is skipped on Windows.
+        </p>
+        <label className="flex items-center gap-2 text-sm cursor-pointer">
+          <input
+            type="checkbox"
+            className="accent-primary"
+            checked={form.stackNetworkPerSite}
+            onChange={(e) => set({ stackNetworkPerSite: e.target.checked })}
+          />
+          Per-site stack network (<code className="text-xs">site-&lt;id&gt;</code>) — app + DB containers share one bridge
+        </label>
+        <label className="flex items-center gap-2 text-sm cursor-pointer">
+          <input
+            type="checkbox"
+            className="accent-primary"
+            checked={form.autoDeployIsolation}
+            onChange={(e) => set({ autoDeployIsolation: e.target.checked })}
+          />
+          Auto-deploy Alpine tenant sidecar after provision
+        </label>
+        <label className={`flex items-start gap-2 text-sm cursor-pointer ${!form.autoDeployIsolation ? "opacity-50" : ""}`}>
+          <input
+            type="checkbox"
+            className="accent-primary mt-0.5"
+            disabled={!form.autoDeployIsolation}
+            checked={form.provisionDockerDb}
+            onChange={(e) => set({ provisionDockerDb: e.target.checked })}
+          />
+          <span>
+            Docker MySQL/MariaDB on the same bridge (needs <strong>mysql-*</strong> or <strong>mariadb-*</strong> DB stack;
+            host PHP uses <code className="text-xs">127.0.0.1:&lt;port&gt;</code>; a Site database row is created)
+          </span>
+        </label>
+      </div>
+
       <ModularSetupSection
         networkGroup={form.networkGroup}
         isCentralService={form.isCentralService}
@@ -456,6 +511,19 @@ export default function SiteTemplatesPage() {
                     )}
                   </div>
                   <p className="text-xs text-muted-foreground font-mono mt-0.5">{t.slug}</p>
+                  {(t.autoDeployIsolation || t.stackNetworkPerSite || t.provisionDockerDb) && (
+                    <div className="flex flex-wrap gap-1.5 mt-1.5">
+                      {t.stackNetworkPerSite && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-600 border border-emerald-500/25">per-site net</span>
+                      )}
+                      {t.autoDeployIsolation && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-700 border border-sky-500/25">auto sidecar</span>
+                      )}
+                      {t.provisionDockerDb && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-800 border border-amber-500/25">Docker DB</span>
+                      )}
+                    </div>
+                  )}
                   <p className="text-sm text-muted-foreground mt-1 capitalize">
                     {t.type} · {t.webServer}
                     {t.phpVersion ? ` · PHP ${t.phpVersion}` : ""}

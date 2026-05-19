@@ -1,0 +1,8 @@
+# HostPanel Node.js services (Fastify API + Next.js) — logs via systemd journal (Pino JSON).
+---
+source: journalctl
+journalctl_filter:
+  - _SYSTEMD_UNIT=hostpanel-api.service
+  - _SYSTEMD_UNIT=hostpanel-web.service
+labels:
+  type: nodejs

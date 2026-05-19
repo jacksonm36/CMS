@@ -1,11 +1,14 @@
 import type { Site } from "@hostpanel/db";
 import { indexFilenamesForSite, nginxExactRootTryFiles } from "../default-document.js";
+import { nginxRedirectBlocks } from "../site-pages.js";
 import { appUpstreamPort } from "./proxy-port.js";
+import type { SiteWebConfigExtras } from "./index.js";
 
 export const NGINX_SITES_DIR = process.env.NGINX_SITES_DIR ?? "/etc/nginx/sites-enabled";
 export const NGINX_LOG_DIR = process.env.NGINX_LOG_DIR ?? "/var/log/nginx";
 
-export function generateConfig(site: Site): string {
+export function generateConfig(site: Site, extras?: SiteWebConfigExtras): string {
+  const redirectBlock = nginxRedirectBlocks(extras?.routes ?? { version: 1, routes: [] });
   const phpSocket = `/run/php/php${site.phpVersion ?? "8.2"}-fpm.sock`;
   const upstream = appUpstreamPort(site);
   const indexDirective = indexFilenamesForSite(site).join(" ");
@@ -35,6 +38,9 @@ export function generateConfig(site: Site): string {
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection 'upgrade';
         proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
         proxy_cache_bypass $http_upgrade;
     }` : "";
 
@@ -42,6 +48,20 @@ export function generateConfig(site: Site): string {
     location / {
         try_files $uri/index.html $uri $uri/ =404;
     }` : "";
+
+  /** Same-origin uptime checks from static site pages (no cross-domain CORS / Pangolin auth). */
+  const uptimeProbeProxyBlock =
+    site.type === "static" || site.type === "php"
+      ? `
+    location /api/monitoring/public-probe {
+        proxy_pass http://127.0.0.1:4000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }`
+      : "";
 
   return `# HostPanel — managed by hostpanel (nginx)
 server {
@@ -60,6 +80,8 @@ server {
     gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
 
     location ~ /\\. { deny all; }
+    ${redirectBlock}
+    ${uptimeProbeProxyBlock}
     ${rootExactBlock}
     ${phpBlock}
     ${proxyBlock}

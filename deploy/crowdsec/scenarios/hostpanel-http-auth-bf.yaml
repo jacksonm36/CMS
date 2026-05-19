@@ -1,0 +1,21 @@
+# Brute-force on HostPanel API — uses security log lines (IP + status on 4xx).
+type: leaky
+name: hostpanel/http-auth-bf
+description: "Detect HTTP auth brute-force against HostPanel API (Pino security logs)"
+filter: >-
+  evt.Line.Labels.type == 'nodejs'
+  && evt.Meta.service == 'http'
+  && evt.Meta.http_status == '401'
+  && evt.Parsed.remote_addr != ''
+groupby: evt.Parsed.remote_addr
+capacity: 5
+leakspeed: 10s
+blackhole: 1m
+labels:
+  remediation: true
+  service: http
+  behavior: http:bruteforce
+  classification:
+    - attack.T1110
+  confidence: 3
+  spoofable: 0

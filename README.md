@@ -94,7 +94,7 @@ See [SECURITY.md](SECURITY.md) for secrets handling, webhooks, and hardening ove
 - **Redis 7** — sessions and caching
 - **Web server** — your choice of Nginx, Apache2, Lighttpd, LiteSpeed Community, Caddy, OpenResty, or Traefik
 - **PHP 8.2 FPM** — for PHP site support (ondrej/sury PPA)
-- **CrowdSec** — collaborative threat intelligence + iptables bouncer *(optional)*
+- **CrowdSec** — collaborative threat intelligence; **install.sh** registers the **crowdsec-firewall-bouncer** LAPI key, enables **iptables/ipset** bans, and optionally ships log acquisition *(optional)*
 - **Docker** — rootless (preferred) or rootful, for isolated site containers *(optional)*
 - **fail2ban** — SSH brute-force mitigation *(optional; installer default on)*
 - **HostPanel** — systemd services `hostpanel-api` + `hostpanel-web` *(reproducible `npm ci` + audit when lockfile present)*
@@ -147,6 +147,9 @@ See [SECURITY.md](SECURITY.md) for secrets handling, webhooks, and hardening ove
 - Bouncer management (API key registration)
 - Hub management — collections, parsers, scenarios, postoverflows
 - Live log viewer
+- **Host installs** ship an acquisition config under `/etc/crowdsec/acquis.d/hostpanel-weblogs.yaml` so the agent reads `/var/log/nginx/*.access.log` and `*.error.log` (including `hostpanel.access.log` / `hostpanel.error.log` and per-site vhost logs), plus OpenResty paths. The `crowdsec` user is added to `adm` / `www-data` where supported so it can read typical Debian log permissions.
+- **Dockerized nginx / OpenResty**: keep log paths consistent with the host and bind-mount the directory into the container, e.g. `-v /var/log/nginx:/var/log/nginx` (and set `access_log` / `error_log` under that path). CrowdSec stays on the host and only sees files present on the host filesystem. For custom host paths (e.g. rotated mirrors), set `HOSTPANEL_NGINX_ACCESS_LOG`, `HOSTPANEL_NGINX_ERROR_LOG`, `HOSTPANEL_NGINX_PANEL_ACCESS_LOG`, `HOSTPANEL_NGINX_PANEL_ERROR_LOG`, or the other `HOSTPANEL_<ENGINE>_*_LOG` variables in the API `.env` so the Web servers “Logs” viewer tails the same files CrowdSec reads.
+- **iptables firewall bouncer** (`crowdsec-firewall-bouncer`): the Debian package ships with `api_key: ${API_KEY}` until registered. **install.sh** runs `cscli bouncers add crowdsec-firewall-bouncer`, writes the key into `/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml`, and starts `crowdsec-firewall-bouncer.service` so decisions apply via **ipset/iptables** on `INPUT`. On an existing host: `sudo bash <install-dir>/deploy/ensure-crowdsec-firewall-bouncer.sh`. *`CROWDSEC_API_KEY` in `.env` is only for HostPanel’s LAPI client — not the firewall bouncer.*
 
 ### Site Management
 - Create/suspend/delete sites (static, PHP, Node.js, Python)

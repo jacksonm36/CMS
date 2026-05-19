@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth-context";
 import {
@@ -11,15 +12,23 @@ import type { SystemMetrics, Site, UptimeCheck } from "@hostpanel/types";
 import { MetricsChart } from "@/components/monitoring/metrics-chart";
 import { StatCard } from "@/components/dashboard/stat-card";
 import { RecentActivity } from "@/components/dashboard/recent-activity";
+import { WebserverAnalyticsPanel } from "@/components/webservers/webserver-analytics-panel";
+import { useLiveSystemMetrics } from "@/hooks/use-live-system-metrics";
 
 export default function DashboardPage() {
-  const { user } = useAuth();
+  const { user, token } = useAuth();
   const staff = user?.role === "superadmin" || user?.role === "admin";
+  const [nginxLogScope, setNginxLogScope] = useState<"daemon" | "panel">("daemon");
+
+  const { metrics: liveMetrics, streamHistory, connected: metricsLiveConnected } = useLiveSystemMetrics(
+    Boolean(staff && token),
+    token,
+  );
 
   const { data: metricsData } = useQuery({
     queryKey: ["metrics"],
     queryFn: () => apiClient.get<{ data: SystemMetrics }>("/monitoring/metrics"),
-    refetchInterval: 10000,
+    refetchInterval: staff && !token ? 10_000 : false,
     enabled: staff,
   });
 
@@ -41,10 +50,24 @@ export default function DashboardPage() {
     enabled: staff,
   });
 
-  const metrics = metricsData?.data;
+  const metrics = liveMetrics ?? metricsData?.data;
+
+  const chartHistory = useMemo(() => {
+    const base = metricsHistory?.data ?? [];
+    const seen = new Set(base.map((m) => m.timestamp));
+    const merged = [...base];
+    for (const p of streamHistory) {
+      if (!seen.has(p.timestamp)) {
+        merged.push(p);
+        seen.add(p.timestamp);
+      }
+    }
+    return merged.slice(-120);
+  }, [metricsHistory?.data, streamHistory]);
+
   const sites = sitesData?.data ?? [];
   const uptimeChecks = uptimeData?.data ?? [];
-  const history = metricsHistory?.data ?? [];
+  const history = chartHistory;
 
   const activeSites = sites.filter((s) => s.status === "active").length;
   const upChecks = uptimeChecks.filter((c) => c.lastStatus === "up").length;
@@ -88,9 +111,16 @@ export default function DashboardPage() {
 
       {/* Charts row — host metrics restricted to staff API */}
       {staff && (
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div className="flex items-center justify-between gap-2">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 flex-1">
         <MetricsChart data={history} metric="cpu" title="CPU Usage" color="#6366f1" unit="%" />
         <MetricsChart data={history} metric="memory.percent" title="Memory Usage" color="#8b5cf6" unit="%" />
+        </div>
+        {metricsLiveConnected && (
+          <span className="text-[10px] shrink-0 self-start mt-2 px-2 py-1 rounded-full border border-emerald-500/30 text-emerald-400 bg-emerald-500/10">
+            Live metrics
+          </span>
+        )}
       </div>
       )}
 
@@ -143,6 +173,24 @@ export default function DashboardPage() {
             </div>
             <p className="text-xs text-muted-foreground">Load: {metrics.loadAvg.join(" / ")}</p>
           </div>
+        </div>
+      )}
+
+      {staff && (
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-sm font-semibold text-muted-foreground">Nginx access log analytics</h2>
+            <a href="/dashboard/webservers" className="text-xs text-primary hover:underline shrink-0">
+              Web servers →
+            </a>
+          </div>
+          <WebserverAnalyticsPanel
+            enabled={staff}
+            authToken={token}
+            serverId="nginx"
+            nginxLogScope={nginxLogScope}
+            onNginxLogScopeChange={setNginxLogScope}
+          />
         </div>
       )}
 

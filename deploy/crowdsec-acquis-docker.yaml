@@ -1,0 +1,9 @@
+# Docker container json-file logs (host reads /var/lib/docker/containers).
+# Requires parser crowdsecurity/docker-logs (cscli parsers install crowdsecurity/docker-logs).
+# Web traffic for HostPanel sites is usually on host nginx; this covers container stdout/stderr.
+---
+poll_without_inotify: true
+filenames:
+  - /var/lib/docker/containers/*/*-json.log
+labels:
+  type: docker

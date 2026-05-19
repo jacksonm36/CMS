@@ -7,7 +7,7 @@ import { appUpstreamPort } from "./proxy-port.js";
 export const LSWS_VHOSTS_DIR = process.env.LSWS_VHOSTS_DIR ?? "/usr/local/lsws/conf/vhosts";
 export const LSWS_LOG_DIR = process.env.LSWS_LOG_DIR ?? "/usr/local/lsws/logs";
 
-export function generateConfig(site: Site): string {
+export function generateConfig(site: Site, _extras?: import("./index.js").SiteWebConfigExtras): string {
   const phpVersion = site.phpVersion ?? "8.2";
   const upstream = appUpstreamPort(site);
   const phpHandler = `lsapi:/tmp/lshttpd/php${phpVersion.replace(".", "")}`;

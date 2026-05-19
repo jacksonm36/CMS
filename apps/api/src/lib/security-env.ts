@@ -64,28 +64,67 @@ export function assertProductionSecrets(): void {
   }
 }
 
-/** Fail fast in production so operators set an explicit browser origin list (see .env.example). */
+function stripEnvQuotes(s: string): string {
+  const t = s.trim();
+  if (t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))) {
+    return t.slice(1, -1).trim();
+  }
+  return t;
+}
+
+function parseCorsOriginList(raw: string | undefined): string[] {
+  if (!raw?.trim()) return [];
+  return raw.split(",").map((p) => stripEnvQuotes(p)).filter(Boolean);
+}
+
+function originFromAppUrl(envKey: "NEXTAUTH_URL" | "WEBAUTHN_ORIGIN"): string[] {
+  const raw = process.env[envKey]?.trim();
+  if (!raw) return [];
+  try {
+    return [new URL(stripEnvQuotes(raw)).origin];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Allowed browser origins for `@fastify/cors`: comma-separated `CORS_ORIGIN`, plus (when set) the origins of
+ * `NEXTAUTH_URL` and `WEBAUTHN_ORIGIN` so a public HTTPS URL and a LAN install URL can both work without duplicating
+ * every value in `CORS_ORIGIN`.
+ */
+export function effectiveCorsOrigins(): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const push = (o: string) => {
+    const t = stripEnvQuotes(o);
+    if (!t || seen.has(t)) return;
+    seen.add(t);
+    out.push(t);
+  };
+  for (const o of parseCorsOriginList(process.env.CORS_ORIGIN)) push(o);
+  for (const o of originFromAppUrl("NEXTAUTH_URL")) push(o);
+  for (const o of originFromAppUrl("WEBAUTHN_ORIGIN")) push(o);
+  return out;
+}
+
+/** Fail fast in production when no browser origins can be derived (see .env.example). */
 export function assertProductionCors(): void {
   if (process.env.NODE_ENV !== "production") return;
-  const origins = process.env.CORS_ORIGIN?.split(",").map((s) => s.trim()).filter(Boolean) ?? [];
-  if (origins.length === 0) {
+  if (effectiveCorsOrigins().length === 0) {
     throw new Error(
-      "[HostPanel] CORS_ORIGIN must be set in production (comma-separated origins, e.g. https://panel.example.com or http://192.168.1.10:3000 for LAN).",
+      "[HostPanel] In production, set CORS_ORIGIN (comma-separated origins) and/or NEXTAUTH_URL / WEBAUTHN_ORIGIN so the API can allow credentialed browser requests (e.g. https://panel.example.com).",
     );
   }
 }
 
 /**
- * CORS for browser clients with credentials. In production, **require** `CORS_ORIGIN`
- * (comma-separated allowed origins); otherwise cross-origin API calls are denied.
+ * CORS for browser clients with credentials. Uses {@link effectiveCorsOrigins}; in production with an empty list,
+ * returns false (assertProductionCors should prevent startup).
  */
 export function corsOriginConfig(): boolean | string[] {
-  const origins = process.env.CORS_ORIGIN
-    ? process.env.CORS_ORIGIN.split(",").map((s) => s.trim()).filter(Boolean)
-    : [];
-  if (origins.length > 0) return origins;
+  const list = effectiveCorsOrigins();
+  if (list.length > 0) return list;
   if (process.env.NODE_ENV === "production") {
-    // assertProductionCors() should forbid startup without CORS_ORIGIN in production
     return false;
   }
   return true;

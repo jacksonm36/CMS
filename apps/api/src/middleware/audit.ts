@@ -39,6 +39,19 @@ export async function auditMiddleware(request: FastifyRequest, reply: FastifyRep
         },
       },
     });
+
+    // High-impact mutations — log prominently for operator SIEM / journald filters (not full alerting product).
+    if (
+      request.method === "DELETE" &&
+      (request.url.includes("/api/auth/users/") ||
+        request.url.includes("/api/sites/") ||
+        request.url.includes("/api/databases/"))
+    ) {
+      request.log.warn(
+        { auditHighImpact: true, method: request.method, url: request.url, statusCode: reply.statusCode, userId },
+        "Audit: high-impact mutation",
+      );
+    }
   } catch {
     // Audit failures must never break the request
   }

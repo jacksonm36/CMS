@@ -1,0 +1,31 @@
+# CrowdSec expr: do not use "!" negation on strings (compile error). Use positive contains/startsWith only.
+filter: "evt.Line.Labels.type == 'nodejs' && evt.Line.Raw contains '{'"
+onsuccess: next_stage
+name: hostpanel/pino-logs
+description: "Parse Fastify/Pino JSON from journal (strip systemd/journal prefix before JSON)"
+nodes:
+  # journald: "May 17 … hostpanel-api[824433]: {\"level\":30,…}"
+  - filter: "evt.Line.Raw contains ']: ' && (evt.Line.Raw contains 'hostpanel-api' || evt.Line.Raw contains 'hostpanel-web')"
+    grok:
+      pattern: '^%{GREEDYDATA}]: %{GREEDYDATA:pino_body}$'
+      apply_on: Line.Raw
+  # rare: raw JSON line without syslog prefix
+  - filter: "evt.Line.Raw startsWith '{'"
+    statics:
+      - parsed: pino_body
+        expression: evt.Line.Raw
+statics:
+  - meta: service
+    value: http
+  - meta: log_type
+    value: http_access-log
+  - parsed: remote_addr
+    expression: 'JsonExtract(evt.Parsed.pino_body, "remoteAddress") != "" ? JsonExtract(evt.Parsed.pino_body, "remoteAddress") : JsonExtract(evt.Parsed.pino_body, "req.remoteAddress")'
+  - meta: http_status
+    expression: 'JsonExtract(evt.Parsed.pino_body, "statusCode") != "" ? JsonExtract(evt.Parsed.pino_body, "statusCode") : JsonExtract(evt.Parsed.pino_body, "res.statusCode")'
+  - parsed: verb
+    expression: 'JsonExtract(evt.Parsed.pino_body, "method") != "" ? JsonExtract(evt.Parsed.pino_body, "method") : JsonExtract(evt.Parsed.pino_body, "req.method")'
+  - parsed: request
+    expression: 'JsonExtract(evt.Parsed.pino_body, "url") != "" ? JsonExtract(evt.Parsed.pino_body, "url") : JsonExtract(evt.Parsed.pino_body, "req.url")'
+  - target: evt.StrTime
+    expression: JsonExtract(evt.Parsed.pino_body, "time")

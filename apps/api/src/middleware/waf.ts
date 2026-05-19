@@ -1,9 +1,11 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
 
 /**
- * Heuristic request fingerprinting — not a substitute for parameterized queries (Prisma) or route-level
- * Zod schemas. Intentionally conservative patterns to limit false positives; normalization reduces trivial
- * comment/encoding bypasses but cannot catch all obfuscation.
+ * Heuristic request fingerprinting — NOT a substitute for parameterized queries (Prisma) or route-level Zod.
+ * SQL injection prevention for app queries is **primarily** ORM parameterization + typed APIs; this layer only
+ * catches naïve payloads in URL/body strings.
+ *
+ * Patterns: normalized URL + JSON body (comment folding, percent-decoding) — see buildWafScanString.
  */
 const THREAT_PATTERNS = [
   /(\bUNION\b.*\bSELECT\b|\bSELECT\b.*\bFROM\b.*\bWHERE\b)/i,

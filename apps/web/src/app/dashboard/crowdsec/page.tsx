@@ -6,8 +6,18 @@ import {
   ShieldAlert, ShieldCheck, ShieldOff, RefreshCw, Download,
   Trash2, Plus, Terminal, AlertTriangle, Activity, Package,
   ChevronDown, ChevronRight, Loader2, Ban,
+  RotateCcw, Play,
 } from "lucide-react";
 import { apiClient } from "@/lib/api";
+import {
+  HubTab,
+  HubPackageCards,
+  InstalledPackagesList,
+  type HubSummary,
+  type HubData,
+  type HubItem,
+  type HubSection,
+} from "./hub-tab";
 
 type Tab = "overview" | "alerts" | "decisions" | "hub" | "logs";
 
@@ -18,7 +28,16 @@ interface CrowdSecStatus {
   running: boolean;
   lapiReachable: boolean;
   lapiVersion: string;
+  lapiUrl?: string;
+  lapiMode?: "local" | "central";
+  centralManagerUrl?: string;
   bouncers: { name: string; ip_address: string; type: string; last_pull: string }[];
+  firewallBouncerActive?: boolean;
+  firewallBouncerNeedsApiKey?: boolean;
+  firewallBouncerYaml?: "missing" | "placeholder" | "keyed";
+  firewallBouncerUnit?: string;
+  hub?: HubSummary;
+  hubInstalled?: Record<HubSection, HubItem[]>;
 }
 
 interface CsAlert {
@@ -73,7 +92,7 @@ export default function CrowdSecPage() {
         ))}
       </div>
 
-      {tab === "overview"  && <OverviewTab />}
+      {tab === "overview"  && <OverviewTab onGoHub={() => setTab("hub")} />}
       {tab === "alerts"    && <AlertsTab />}
       {tab === "decisions" && <DecisionsTab />}
       {tab === "hub"       && <HubTab />}
@@ -82,9 +101,85 @@ export default function CrowdSecPage() {
   );
 }
 
+// ─── Shared UI ────────────────────────────────────────────────────────────────
+
+function ToolbarButton({
+  onClick,
+  disabled,
+  pending,
+  icon: Icon,
+  label,
+  variant = "default",
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+  pending?: boolean;
+  icon: React.ElementType;
+  label: string;
+  variant?: "default" | "primary" | "danger";
+}) {
+  const cls =
+    variant === "primary"
+      ? "bg-primary text-primary-foreground hover:bg-primary/90"
+      : variant === "danger"
+        ? "bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20"
+        : "border hover:bg-accent";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled || pending}
+      className={`flex items-center gap-1.5 text-xs rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50 ${cls}`}
+    >
+      {pending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Icon className="w-3.5 h-3.5" />}
+      {label}
+    </button>
+  );
+}
+
+function OverviewHubSection({
+  hub,
+  hubData,
+  hubInstalled,
+  hubLoading,
+  hubError,
+  onOpenHub,
+}: {
+  hub?: HubSummary;
+  hubData?: HubData;
+  hubInstalled?: Record<HubSection, HubItem[]>;
+  hubLoading?: boolean;
+  hubError?: string | null;
+  onOpenHub?: () => void;
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="flex justify-end">
+        <button type="button" onClick={onOpenHub} className="text-xs text-primary hover:underline">Manage in Hub →</button>
+      </div>
+      {hub ? <HubPackageCards hub={hub} /> : null}
+      <InstalledPackagesList
+        data={hubData}
+        fallbackInstalled={hubInstalled}
+        loading={hubLoading}
+        error={hubError}
+      />
+    </div>
+  );
+}
+
+function CommandOutput({ text }: { text?: string }) {
+  if (!text) return null;
+  return (
+    <pre className="text-xs bg-secondary/30 rounded-lg p-3 font-mono whitespace-pre-wrap max-h-40 overflow-auto border border-border">
+      {text}
+    </pre>
+  );
+}
+
 // ─── Overview ─────────────────────────────────────────────────────────────────
 
-function OverviewTab() {
+function OverviewTab({ onGoHub }: { onGoHub: () => void }) {
   const queryClient = useQueryClient();
 
   const { data, isLoading } = useQuery({
@@ -93,13 +188,20 @@ function OverviewTab() {
     refetchInterval: 15000,
   });
 
-  const installMutation = useMutation({
-    mutationFn: () => apiClient.post("/crowdsec/install", {}),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["cs-status"] }),
+  const {
+    data: hubQuery,
+    isLoading: hubLoading,
+    isError: hubIsError,
+    error: hubError,
+  } = useQuery({
+    queryKey: ["cs-hub"],
+    queryFn: () => apiClient.get<{ data: HubData }>("/crowdsec/hub"),
+    enabled: Boolean(data?.data?.installed),
+    staleTime: 30_000,
   });
 
-  const addBouncerMutation = useMutation({
-    mutationFn: (name: string) => apiClient.post("/crowdsec/bouncers", { name }),
+  const installMutation = useMutation({
+    mutationFn: () => apiClient.post("/crowdsec/install", {}),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["cs-status"] }),
   });
 
@@ -108,8 +210,38 @@ function OverviewTab() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["cs-status"] }),
   });
 
+  const setupHubMutation = useMutation({
+    mutationFn: () => apiClient.post("/crowdsec/hub/setup", {}),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["cs-status"] });
+      queryClient.invalidateQueries({ queryKey: ["cs-hub"] });
+    },
+  });
+
+  const restartAgentMutation = useMutation({
+    mutationFn: () => apiClient.post("/crowdsec/services/crowdsec/restart", {}),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["cs-status"] }),
+  });
+
+  const restartFwMutation = useMutation({
+    mutationFn: () => apiClient.post("/crowdsec/services/crowdsec-firewall-bouncer/restart", {}),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["cs-status"] }),
+  });
+
   const [newBouncer, setNewBouncer] = useState("");
+  const [bouncerKeyReveal, setBouncerKeyReveal] = useState<string | null>(null);
+  const [actionOutput, setActionOutput] = useState("");
   const status = data?.data;
+
+  const addBouncerMutationWithKey = useMutation({
+    mutationFn: (name: string) => apiClient.post<{ data?: { api_key?: string; output?: string }; message?: string }>("/crowdsec/bouncers", { name }),
+    onSuccess: (res) => {
+      const key = res?.data?.api_key;
+      if (key) setBouncerKeyReveal(key);
+      else setActionOutput(String(res?.data?.output ?? res?.message ?? "Bouncer registered"));
+      queryClient.invalidateQueries({ queryKey: ["cs-status"] });
+    },
+  });
 
   if (isLoading) return <div className="grid grid-cols-2 md:grid-cols-4 gap-4">{Array.from({length: 4}).map((_,i) => <div key={i} className="rounded-xl border bg-card p-5 h-24 animate-pulse" />)}</div>;
 
@@ -142,12 +274,39 @@ function OverviewTab() {
   return (
     <div className="space-y-5">
       {/* Status cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
         {[
           { label: "Agent", value: status.running ? "Running" : "Stopped", color: status.running ? "text-emerald-400" : "text-red-400", dot: status.running ? "bg-emerald-400 animate-pulse" : "bg-red-400" },
           { label: "LAPI",  value: status.lapiReachable ? "Reachable" : "Unreachable", color: status.lapiReachable ? "text-emerald-400" : "text-red-400", dot: status.lapiReachable ? "bg-emerald-400" : "bg-red-400" },
-          { label: "Version", value: status.lapiVersion, color: "text-foreground", dot: "" },
-          { label: "Bouncers", value: String(status.bouncers?.length ?? 0), color: "text-primary font-bold", dot: "" },
+          { label: status.lapiMode === "central" ? "Agent" : "Version", value: status.lapiVersion, color: "text-foreground", dot: "" },
+          { label: "LAPI bouncers", value: String(status.bouncers?.length ?? 0), color: "text-primary font-bold", dot: "" },
+          {
+            label: "Firewall bouncer",
+            value:
+              status.firewallBouncerYaml === "missing"
+                ? "Not installed"
+                : status.firewallBouncerNeedsApiKey
+                  ? "Needs API key"
+                  : status.firewallBouncerActive
+                    ? "Enforcing"
+                    : "Down",
+            color:
+              status.firewallBouncerYaml === "missing"
+                ? "text-muted-foreground"
+                : status.firewallBouncerNeedsApiKey
+                  ? "text-amber-400"
+                  : status.firewallBouncerActive
+                    ? "text-emerald-400"
+                    : "text-red-400",
+            dot:
+              status.firewallBouncerYaml === "missing"
+                ? ""
+                : status.firewallBouncerNeedsApiKey
+                  ? "bg-amber-400"
+                  : status.firewallBouncerActive
+                    ? "bg-emerald-400 animate-pulse"
+                    : "bg-red-400",
+          },
         ].map(({ label, value, color, dot }) => (
           <div key={label} className="rounded-xl border bg-card p-5">
             <p className="text-xs text-muted-foreground mb-2">{label}</p>
@@ -159,22 +318,100 @@ function OverviewTab() {
         ))}
       </div>
 
+      {status.lapiMode === "central" && status.lapiUrl ? (
+        <div className="rounded-lg border border-border bg-secondary/20 px-4 py-3 text-sm text-muted-foreground">
+          <p>
+            Central LAPI at <code className="font-mono text-xs">{status.lapiUrl}</code>
+            {status.centralManagerUrl ? (
+              <> · Manager UI <code className="font-mono text-xs">{status.centralManagerUrl}</code></>
+            ) : null}
+          </p>
+          <p className="text-xs mt-1">Bouncers listed below are registered on this host at the central console.</p>
+        </div>
+      ) : null}
+
+      <OverviewHubSection
+        hub={status.hub}
+        hubData={hubQuery?.data}
+        hubInstalled={status.hubInstalled}
+        hubLoading={hubLoading}
+        hubError={hubIsError ? (hubError as Error)?.message ?? "Request failed" : null}
+        onOpenHub={onGoHub}
+      />
+
+      <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-card px-4 py-3">
+        <span className="text-xs font-medium text-muted-foreground mr-1">Actions</span>
+        <ToolbarButton
+          icon={RefreshCw}
+          label="Refresh"
+          onClick={() => {
+            queryClient.invalidateQueries({ queryKey: ["cs-status"] });
+            queryClient.invalidateQueries({ queryKey: ["cs-hub"] });
+          }}
+        />
+        <ToolbarButton
+          icon={RotateCcw}
+          label="Restart agent"
+          pending={restartAgentMutation.isPending}
+          onClick={() => restartAgentMutation.mutate()}
+        />
+        <ToolbarButton
+          icon={Play}
+          label="Restart firewall bouncer"
+          pending={restartFwMutation.isPending}
+          onClick={() => restartFwMutation.mutate()}
+        />
+        <ToolbarButton
+          icon={Download}
+          label="Install recommended hub"
+          variant="primary"
+          pending={setupHubMutation.isPending}
+          onClick={() => setupHubMutation.mutate()}
+        />
+      </div>
+      <CommandOutput text={actionOutput || (setupHubMutation.data as { data?: { output?: string } })?.data?.output} />
+
+      {bouncerKeyReveal ? (
+        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm">
+          <p className="font-medium text-amber-100">New bouncer API key (copy now — shown once)</p>
+          <code className="block mt-2 text-xs font-mono break-all bg-black/30 p-2 rounded">{bouncerKeyReveal}</code>
+          <button type="button" className="text-xs mt-2 text-muted-foreground hover:text-foreground" onClick={() => setBouncerKeyReveal(null)}>
+            Dismiss
+          </button>
+        </div>
+      ) : null}
+
+      {status.firewallBouncerNeedsApiKey ? (
+        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200/90">
+          <p className="font-medium text-amber-100">Firewall bouncer is not configured</p>
+          <p className="text-xs mt-1 text-muted-foreground">
+            On the server, run as root:{" "}
+            <code className="font-mono text-[11px] bg-black/30 px-1 py-0.5 rounded">
+              sudo bash /opt/hostpanel/deploy/ensure-crowdsec-firewall-bouncer.sh
+            </code>{" "}
+            (path is your HostPanel install directory, e.g. <code className="font-mono text-[11px]">/opt/hostpanel</code>). This registers the iptables bouncer with the Local API and starts <code className="font-mono text-[11px]">crowdsec-firewall-bouncer</code>.
+          </p>
+        </div>
+      ) : null}
+
       {/* Bouncers */}
       <div className="rounded-xl border bg-card overflow-hidden">
         <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-          <h3 className="font-semibold">Bouncers</h3>
+          <h3 className="font-semibold">LAPI bouncers</h3>
           <div className="flex items-center gap-2">
             <input value={newBouncer} onChange={(e) => setNewBouncer(e.target.value)} placeholder="bouncer-name" className="h-8 w-40 rounded-md border border-input bg-secondary/50 px-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-ring" />
-            <button onClick={() => { if (newBouncer) { addBouncerMutation.mutate(newBouncer); setNewBouncer(""); } }} disabled={!newBouncer || addBouncerMutation.isPending} className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50">
-              <Plus className="w-3 h-3" /> Add
+            <button onClick={() => { if (newBouncer) { addBouncerMutationWithKey.mutate(newBouncer); setNewBouncer(""); } }} disabled={!newBouncer || addBouncerMutationWithKey.isPending} className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50">
+              <Plus className="w-3 h-3" /> Add bouncer
             </button>
           </div>
         </div>
 
         {(status.bouncers?.length ?? 0) === 0 ? (
           <div className="p-8 text-center text-sm text-muted-foreground">
-            <p className="mb-2">No bouncers registered.</p>
-            <p className="text-xs">After installing a bouncer (e.g. <code className="font-mono">crowdsec-firewall-bouncer-iptables</code>), add its API key here.</p>
+            <p className="mb-2">No LAPI clients registered yet.</p>
+            <p className="text-xs">
+              <code className="font-mono">hostpanel-api</code> should appear after install (key in <code className="font-mono">.env</code> as <code className="font-mono">CROWDSEC_API_KEY</code>). Use Add below to register extra bouncers (name only — the key is shown once in <code className="font-mono">cscli</code> output).
+            </p>
           </div>
         ) : (
           <table className="w-full text-sm">
@@ -188,8 +425,15 @@ function OverviewTab() {
                   <td className="px-5 py-3 text-xs font-mono text-muted-foreground">{b.ip_address || "—"}</td>
                   <td className="px-5 py-3 text-xs">{b.type}</td>
                   <td className="px-5 py-3 text-xs text-muted-foreground">{b.last_pull ? new Date(b.last_pull).toLocaleString() : "Never"}</td>
-                  <td className="px-5 py-3 opacity-0 group-hover:opacity-100">
-                    <button onClick={() => removeBouncerMutation.mutate(b.name)} className="text-xs text-destructive hover:underline flex items-center gap-1"><Trash2 className="w-3 h-3" /> Remove</button>
+                  <td className="px-5 py-3">
+                    <button
+                      type="button"
+                      onClick={() => { if (confirm(`Remove bouncer "${b.name}"?`)) removeBouncerMutation.mutate(b.name); }}
+                      disabled={removeBouncerMutation.isPending}
+                      className="text-xs text-destructive hover:underline flex items-center gap-1 opacity-70 hover:opacity-100"
+                    >
+                      <Trash2 className="w-3 h-3" /> Delete
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -379,76 +623,6 @@ function DecisionsTab() {
                       <Trash2 className="w-3 h-3" /> Remove
                     </button>
                   </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ─── Hub ──────────────────────────────────────────────────────────────────────
-
-function HubTab() {
-  const queryClient = useQueryClient();
-  const [section, setSection] = useState<"collections" | "parsers" | "scenarios">("collections");
-
-  const { data, isLoading } = useQuery({
-    queryKey: ["cs-hub"],
-    queryFn: () => apiClient.get<{ data: Record<string, unknown[]> }>("/crowdsec/hub"),
-  });
-
-  const updateMutation = useMutation({
-    mutationFn: () => apiClient.post("/crowdsec/hub/update", {}),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["cs-hub"] }),
-  });
-
-  const items = (data?.data?.[section] as unknown[] ?? []) as { name: string; status: string; local_version?: string; local_path?: string; description?: string; author?: string }[];
-
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div className="flex gap-1 bg-secondary/50 rounded-lg p-1">
-          {(["collections", "parsers", "scenarios"] as const).map((s) => (
-            <button key={s} onClick={() => setSection(s)} className={`px-3 py-1.5 text-xs rounded-md font-medium capitalize transition-all ${section === s ? "bg-background shadow text-foreground" : "text-muted-foreground"}`}>
-              {s} {data?.data?.[s] ? `(${(data.data[s] as unknown[]).length})` : ""}
-            </button>
-          ))}
-        </div>
-        <button onClick={() => updateMutation.mutate()} disabled={updateMutation.isPending} className="flex items-center gap-1.5 text-xs border rounded-lg px-3 py-1.5 hover:bg-accent transition-colors disabled:opacity-50">
-          {updateMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-          Update Hub
-        </button>
-      </div>
-
-      {updateMutation.data != null ? (
-        <div className="text-xs bg-secondary/30 rounded-lg p-3 font-mono whitespace-pre-wrap">
-          {String((updateMutation.data as { data?: { output?: string } }).data?.output ?? "")}
-        </div>
-      ) : null}
-
-      <div className="rounded-xl border bg-card overflow-hidden">
-        {isLoading ? <div className="p-8 text-center text-sm text-muted-foreground">Loading hub data...</div> : items.length === 0 ? (
-          <div className="p-8 text-center text-sm text-muted-foreground">No {section} found. Make sure CrowdSec is installed.</div>
-        ) : (
-          <table className="w-full text-sm">
-            <thead className="border-b border-border">
-              <tr>{["Name", "Status", "Version", "Author", "Description"].map((h) => <th key={h} className="px-5 py-3 text-left text-xs font-medium text-muted-foreground">{h}</th>)}</tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {items.map((item) => (
-                <tr key={item.name} className="hover:bg-muted/30">
-                  <td className="px-5 py-3 font-mono text-xs font-medium">{item.name}</td>
-                  <td className="px-5 py-3">
-                    <span className={`text-xs px-2 py-0.5 rounded-full ${item.status === "enabled" ? "bg-emerald-500/15 text-emerald-400" : "bg-secondary text-muted-foreground"}`}>
-                      {item.status}
-                    </span>
-                  </td>
-                  <td className="px-5 py-3 text-xs font-mono text-muted-foreground">{item.local_version ?? "—"}</td>
-                  <td className="px-5 py-3 text-xs text-muted-foreground">{item.author ?? "—"}</td>
-                  <td className="px-5 py-3 text-xs text-muted-foreground truncate max-w-[300px]">{item.description ?? "—"}</td>
                 </tr>
               ))}
             </tbody>

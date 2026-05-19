@@ -5,7 +5,7 @@ import { appUpstreamPort } from "./proxy-port.js";
 export const LIGHTTPD_CONF_DIR = process.env.LIGHTTPD_CONF_DIR ?? "/etc/lighttpd/conf-enabled";
 export const LIGHTTPD_LOG_DIR = process.env.LIGHTTPD_LOG_DIR ?? "/var/log/lighttpd";
 
-export function generateConfig(site: Site): string {
+export function generateConfig(site: Site, _extras?: import("./index.js").SiteWebConfigExtras): string {
   const phpVersion = site.phpVersion ?? "8.2";
   const upstream = appUpstreamPort(site);
   const idxList = indexFilenamesForSite(site).map((n) => `"${n}"`).join(", ");

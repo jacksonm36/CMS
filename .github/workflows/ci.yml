@@ -60,8 +60,10 @@ jobs:
       - name: Typecheck
         run: npm run typecheck --if-present
 
-      - name: Site file path guard tests
+      - name: API unit tests (Vitest)
         run: npm run test:files --if-present
+        env:
+          HOSTPANEL_SKIP_REDIS_PING: "true"
 
       - name: Build
         run: npm run build

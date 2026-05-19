@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Activity, Plus, Trash2, CheckCircle2, XCircle, AlertTriangle, Bell } from "lucide-react";
@@ -9,12 +9,13 @@ import { formatRelative } from "@/lib/utils";
 import type { UptimeCheck, AlertRule, SystemMetrics } from "@hostpanel/types";
 import { MetricsChart } from "@/components/monitoring/metrics-chart";
 import { useAuth } from "@/lib/auth-context";
+import { useLiveSystemMetrics } from "@/hooks/use-live-system-metrics";
 
 type Tab = "overview" | "uptime" | "alerts";
 
 export default function MonitoringPage() {
   const router = useRouter();
-  const { user, loading } = useAuth();
+  const { user, loading, token } = useAuth();
   const staff = user?.role === "superadmin" || user?.role === "admin";
   const [tab, setTab] = useState<Tab>("overview");
 
@@ -66,18 +67,23 @@ export default function MonitoringPage() {
         ))}
       </div>
 
-      {tab === "overview" && <MetricsOverview />}
+      {tab === "overview" && <MetricsOverview authToken={token ?? null} />}
       {tab === "uptime" && <UptimeTab />}
       {tab === "alerts" && <AlertsTab />}
     </div>
   );
 }
 
-function MetricsOverview() {
+function MetricsOverview({ authToken }: { authToken: string | null }) {
+  const { metrics: liveMetrics, streamHistory, connected: metricsLiveConnected } = useLiveSystemMetrics(
+    Boolean(authToken),
+    authToken,
+  );
+
   const { data: currentData } = useQuery({
     queryKey: ["metrics"],
     queryFn: () => apiClient.get<{ data: SystemMetrics }>("/monitoring/metrics"),
-    refetchInterval: 5000,
+    refetchInterval: authToken ? false : 5000,
   });
 
   const { data: historyData } = useQuery({
@@ -86,11 +92,30 @@ function MetricsOverview() {
     refetchInterval: 60000,
   });
 
-  const metrics = currentData?.data;
-  const history = historyData?.data ?? [];
+  const metrics = liveMetrics ?? currentData?.data;
+
+  const history = useMemo(() => {
+    const base = historyData?.data ?? [];
+    const seen = new Set(base.map((m) => m.timestamp));
+    const merged = [...base];
+    for (const p of streamHistory) {
+      if (!seen.has(p.timestamp)) {
+        merged.push(p);
+        seen.add(p.timestamp);
+      }
+    }
+    return merged.slice(-120);
+  }, [historyData?.data, streamHistory]);
 
   return (
     <div className="space-y-4">
+      <div className="flex items-center justify-end gap-2">
+        {metricsLiveConnected && (
+          <span className="text-[10px] px-2 py-1 rounded-full border border-emerald-500/30 text-emerald-400 bg-emerald-500/10">
+            Live metrics stream
+          </span>
+        )}
+      </div>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
           { label: "CPU", value: metrics?.cpu ?? 0, color: metrics && metrics.cpu > 80 ? "#f87171" : "#6366f1", unit: "%" },

@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Uptime Monitor</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.34.0/dist/tabler-icons.min.css" crossorigin="anonymous" />
+  <style>
+    :root {
+      --color-text-primary: #e8edf4;
+      --color-text-secondary: #8b9cb3;
+      --color-background-primary: #121820;
+      --color-background-secondary: #1a222d;
+      --color-border-tertiary: rgba(148, 163, 184, 0.2);
+      --color-border-secondary: rgba(148, 163, 184, 0.35);
+      --border-radius-md: 10px;
+      --border-radius-lg: 14px;
+    }
+    html, body {
+      margin: 0;
+      background: #0b0f14;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      font-size: 16px;
+      color: var(--color-text-primary);
+      -webkit-font-smoothing: antialiased;
+    }
+    .dash {
+      box-sizing: border-box;
+      max-width: min(1200px, 96vw);
+      margin: 0 auto;
+      padding: 2rem 1.75rem 3rem;
+    }
+    * { box-sizing: border-box; }
+    .dash * { margin: 0; padding: 0; }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1.75rem;
+      flex-wrap: wrap;
+      gap: 14px;
+    }
+    .topbar h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      color: var(--color-text-primary);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .topbar h1 .ti { font-size: 1.65rem !important; }
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 14px;
+      margin-bottom: 1.75rem;
+    }
+    @media (max-width: 700px) {
+      .metrics-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    .mc {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      min-height: 5.5rem;
+      background: var(--color-background-secondary);
+      border-radius: var(--border-radius-md);
+      padding: 18px 20px;
+      border: 1px solid var(--color-border-tertiary);
+    }
+    .mc-label {
+      font-size: 0.8rem;
+      color: var(--color-text-secondary);
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .mc-val {
+      font-size: 2rem;
+      font-weight: 600;
+      color: var(--color-text-primary);
+      line-height: 1.1;
+    }
+    .mc-val.ok { color: #1d9e75; }
+    .mc-val.err { color: #a32d2d; }
+    .section-hdr {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+      margin-top: 0.5rem;
+    }
+    .section-title {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--color-text-secondary);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    .topbar button {
+      font-size: 1rem;
+      font-family: inherit;
+      white-space: nowrap;
+      padding: 12px 18px;
+      border-radius: var(--border-radius-md);
+      border: 1px solid #0284c7;
+      background: #0ea5e9;
+      color: #fff;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .topbar button:hover { background: #38bdf8; }
+    .monitors { display: flex; flex-direction: column; gap: 10px; }
+    .mrow {
+      background: var(--color-background-primary);
+      border: 1px solid var(--color-border-tertiary);
+      border-radius: var(--border-radius-lg);
+      padding: 16px 20px;
+      display: grid;
+      grid-template-columns: 14px 1fr auto;
+      align-items: center;
+      gap: 16px;
+    }
+    .mrow:hover { border-color: var(--color-border-secondary); }
+    .sdot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+    .sdot.up { background: #1d9e75; box-shadow: 0 0 0 3px rgba(29, 158, 117, 0.15); }
+    .sdot.down { background: #e24b4a; box-shadow: 0 0 0 3px rgba(226, 75, 74, 0.15); }
+    .sdot.warn { background: #ef9f27; box-shadow: 0 0 0 3px rgba(239, 159, 39, 0.15); }
+    .sdot.checking { background: #888780; animation: blink 1s ease-in-out infinite; }
+    @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+    .mname {
+      font-size: 1.05rem;
+      font-weight: 600;
+      color: var(--color-text-primary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .murl {
+      font-size: 0.9rem;
+      color: var(--color-text-secondary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-family: ui-monospace, monospace;
+      margin-top: 4px;
+    }
+    .mright { display: flex; align-items: center; gap: 14px; flex-shrink: 0; }
+    .bars { display: flex; gap: 3px; align-items: flex-end; height: 28px; }
+    .bar { width: 6px; height: 100%; border-radius: 3px; background: var(--color-border-tertiary); }
+    .bar.up { background: #1d9e75; opacity: 0.8; }
+    .bar.down { background: #e24b4a; opacity: 0.8; }
+    .bar.warn { background: #ef9f27; opacity: 0.8; }
+    .badge {
+      font-size: 0.85rem;
+      padding: 4px 12px;
+      border-radius: 999px;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+    .badge.up { background: #e1f5ee; color: #0f6e56; }
+    .badge.down { background: #fcebeb; color: #a32d2d; }
+    .badge.warn { background: #faeeda; color: #854f0b; }
+    .badge.checking { background: var(--color-background-secondary); color: var(--color-text-secondary); }
+    .mms {
+      font-size: 1rem;
+      color: var(--color-text-secondary);
+      min-width: 4.5rem;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+    .pct { font-size: 0.95rem; min-width: 3.5rem; text-align: right; font-weight: 600; }
+    .pct.ok { color: #1d9e75; }
+    .pct.warn { color: #ba7517; }
+    .pct.err { color: #a32d2d; }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      border: 0;
+    }
+    .footer-note { margin-top: 1.75rem; font-size: 0.95rem; color: var(--color-text-secondary); }
+    #last-refresh { font-size: 0.95rem; color: var(--color-text-secondary); }
+  </style>
+</head>
+<body>
+
+<h2 class="sr-only">Infrastructure uptime monitor</h2>
+
+<div class="dash">
+  <header class="topbar">
+    <h1><i class="ti ti-activity-heartbeat" style="color:#1D9E75" aria-hidden="true"></i> Uptime Monitor</h1>
+    <div style="display:flex;align-items:center;gap:8px">
+      <span id="last-refresh">Idle</span>
+      <button type="button" id="btn-check-all"><i class="ti ti-refresh" aria-hidden="true"></i> Check all</button>
+    </div>
+  </header>
+
+  <div class="metrics-grid">
+    <div class="mc"><div class="mc-label">Monitors</div><div class="mc-val" id="m-total">0</div></div>
+    <div class="mc"><div class="mc-label">Online</div><div class="mc-val ok" id="m-up">0</div></div>
+    <div class="mc"><div class="mc-label">Issues</div><div class="mc-val err" id="m-down">0</div></div>
+    <div class="mc"><div class="mc-label">Avg response</div><div class="mc-val" id="m-ms">-</div></div>
+  </div>
+
+  <div id="sections"></div>
+
+  <p class="footer-note">
+    <i class="ti ti-info-circle" style="font-size:13px;vertical-align:-1px" aria-hidden="true"></i>
+    Auto-refreshes every 30 seconds. Edit the <code>MONITORS</code> list in this HTML file to change sites.
+  </p>
+</div>
+
+<script>
+/**
+ * Hardcoded monitors — edit this list in the HTML file to change what is checked.
+ *  id   — stable key for saved history (letters/numbers only)
+ *  name — label shown in the UI
+ *  url  — full https URL to probe
+ *  cat  — group heading in the list
+ */
+const MONITORS = [
+  { id: 'cloud', name: 'Cloud', url: 'https://cloud.gamedns.hu', cat: 'Website' },
+  { id: 'amp',   name: 'AMP Panel', url: 'https://amp.gamedns.hu', cat: 'AMP Server' },
+];
+
+const STORAGE_KEY = 'uptime_monitor_state_v1';
+/** How often to re-check all monitors (milliseconds). */
+const AUTO_REFRESH_MS = 30_000;
+
+const refreshEl = () => document.getElementById('last-refresh');
+
+function probeApiUrl(targetUrl) {
+  return location.origin + '/api/monitoring/public-probe?url=' + encodeURIComponent(targetUrl);
+}
+
+function normalizeUrl(url) {
+  let u = url.trim();
+  if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
+  return u.replace(/\/+$/, '') || u;
+}
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') return parsed;
+    }
+  } catch (e) { /* ignore */ }
+  return {};
+}
+
+function saveState() {
+  const state = {};
+  for (const m of monitors) {
+    state[m.id] = {
+      status: m.status,
+      ms: m.ms,
+      history: m.history,
+      uptime: m.uptime,
+    };
+  }
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch (e) { /* ignore */ }
+}
+
+function buildMonitors() {
+  const saved = loadState();
+  return MONITORS.map((def) => {
+    const s = saved[def.id] || {};
+    return {
+      id: def.id,
+      name: def.name,
+      url: normalizeUrl(def.url),
+      cat: def.cat,
+      status: ['up', 'down', 'warn', 'checking'].includes(s.status) ? s.status : 'checking',
+      ms: typeof s.ms === 'number' && s.ms >= 0 ? s.ms : null,
+      history: Array.isArray(s.history)
+        ? s.history.filter((h) => ['up', 'down', 'warn', 'checking'].includes(h)).slice(-40)
+        : [],
+      uptime: typeof s.uptime === 'number' && Number.isFinite(s.uptime) ? s.uptime : null,
+    };
+  });
+}
+
+let monitors = buildMonitors();
+let checkInFlight = false;
+let nextCheckAt = Date.now() + AUTO_REFRESH_MS;
+
+function scheduleNextCheck() {
+  nextCheckAt = Date.now() + AUTO_REFRESH_MS;
+}
+
+function setRefreshStatus(text) {
+  refreshEl().textContent = text;
+}
+
+function updateCountdown() {
+  if (checkInFlight) return;
+  const sec = Math.max(0, Math.ceil((nextCheckAt - Date.now()) / 1000));
+  if (sec > 0) {
+    setRefreshStatus('Next check in ' + sec + 's');
+  }
+}
+
+async function runProbe(m) {
+  try {
+    const ctrl = new AbortController();
+    const tid = setTimeout(() => ctrl.abort(), 12000);
+    const r = await fetch(probeApiUrl(m.url), { signal: ctrl.signal, cache: 'no-store' });
+    clearTimeout(tid);
+    const body = await r.json();
+    if (!r.ok || !body.success) throw new Error('probe failed');
+    const d = body.data;
+    const ms = typeof d.responseMs === 'number' && Number.isFinite(d.responseMs) ? Math.max(0, d.responseMs) : null;
+    m.ms = ms;
+    m.status = d.status === 'up' ? (ms !== null && ms > 3000 ? 'warn' : 'up') : 'down';
+  } catch (e) {
+    m.status = 'down';
+    m.ms = null;
+  }
+  m.history = [...m.history.slice(-39), m.status];
+  const upCount = m.history.filter((h) => h === 'up' || h === 'warn').length;
+  m.uptime = m.history.length ? Math.round((upCount / m.history.length) * 1000) / 10 : null;
+}
+
+async function checkAll() {
+  if (checkInFlight) return;
+  checkInFlight = true;
+  setRefreshStatus('Checking...');
+  try {
+    for (const m of monitors) {
+      m.status = 'checking';
+      render();
+      await runProbe(m);
+      saveState();
+      render();
+    }
+    setRefreshStatus('Updated ' + new Date().toLocaleTimeString());
+    scheduleNextCheck();
+  } finally {
+    checkInFlight = false;
+  }
+}
+
+function updateMetrics() {
+  const total = monitors.length;
+  const up = monitors.filter((m) => m.status === 'up' || m.status === 'warn').length;
+  const down = monitors.filter((m) => m.status === 'down').length;
+  const msList = monitors.filter((m) => m.ms !== null).map((m) => m.ms);
+  const avg = msList.length ? Math.round(msList.reduce((a, b) => a + b, 0) / msList.length) : null;
+  document.getElementById('m-total').textContent = total;
+  document.getElementById('m-up').textContent = up;
+  document.getElementById('m-down').textContent = down;
+  document.getElementById('m-ms').textContent = avg !== null ? avg + ' ms' : '-';
+  document.getElementById('m-up').className = 'mc-val' + (up === total && total > 0 ? ' ok' : up > 0 ? ' ok' : '');
+  document.getElementById('m-down').className = 'mc-val' + (down > 0 ? ' err' : '');
+}
+
+function renderBars(history) {
+  if (!history.length) return Array(20).fill('<div class="bar"></div>').join('');
+  const bars = history.slice(-20);
+  while (bars.length < 20) bars.unshift(null);
+  return bars.map((b) => (b ? '<div class="bar ' + b + '"></div>' : '<div class="bar"></div>')).join('');
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function render() {
+  updateMetrics();
+  const cats = [...new Set(monitors.map((m) => m.cat))];
+  const wrap = document.getElementById('sections');
+  let html = '';
+  cats.forEach((cat) => {
+    const group = monitors.filter((m) => m.cat === cat);
+    html += `<div class="section-hdr"><span class="section-title">${escHtml(cat)}</span><span style="font-size:12px;color:var(--color-text-secondary)">${group.length} monitor${group.length !== 1 ? 's' : ''}</span></div>`;
+    html += '<div class="monitors">';
+    group.forEach((m) => {
+      const s = m.status;
+      const bdg = s === 'up' ? 'Up' : s === 'down' ? 'Down' : s === 'warn' ? 'Degraded' : 'Checking';
+      const pctClass = m.uptime === null ? '' : m.uptime >= 99 ? 'ok' : m.uptime >= 90 ? 'warn' : 'err';
+      const msText = m.ms !== null ? m.ms + ' ms' : '-';
+      html += `<div class="mrow" id="row-${escHtml(m.id)}">
+        <div class="sdot ${s}" title="${s}"></div>
+        <div style="min-width:0">
+          <div class="mname">${escHtml(m.name)}</div>
+          <div class="murl">${escHtml(m.url)}</div>
+          <div style="display:flex;align-items:center;gap:8px;margin-top:5px">
+            <div class="bars">${renderBars(m.history)}</div>
+            ${m.uptime !== null ? `<span class="pct ${pctClass}">${m.uptime.toFixed(1)}%</span>` : ''}
+          </div>
+        </div>
+        <div class="mright">
+          <span class="mms">${msText}</span>
+          <span class="badge ${s}">${bdg}</span>
+        </div>
+      </div>`;
+    });
+    html += '</div>';
+  });
+  wrap.innerHTML = html;
+}
+
+document.getElementById('btn-check-all').addEventListener('click', () => { void checkAll(); });
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && !checkInFlight && Date.now() >= nextCheckAt - 2000) {
+    void checkAll();
+  }
+});
+
+setInterval(() => {
+  updateCountdown();
+  if (!checkInFlight && Date.now() >= nextCheckAt) {
+    void checkAll();
+  }
+}, 1000);
+
+render();
+scheduleNextCheck();
+setTimeout(() => { void checkAll(); }, 400);
+</script>
+</body>
+</html>

@@ -7,11 +7,12 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Play, Square, RefreshCw, Download, CheckCircle2, XCircle,
   AlertTriangle, Terminal, FileCode2, ChevronDown, ChevronRight,
-  Loader2, Server, Settings, Trash2, Copy, Check, Code2,
+  Loader2, Server, Settings, Trash2, Copy, Check, Code2, TrendingUp,
 } from "lucide-react";
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { postHostNodeInstallStream } from "@/lib/host-node-install-stream";
+import { WebserverAnalyticsPanel } from "@/components/webservers/webserver-analytics-panel";
 import { postWebserverInstallStream } from "@/lib/webserver-install-stream";
 import type { WebServerInfo, WebServerType } from "@hostpanel/types";
 
@@ -87,7 +88,7 @@ function StatusBadge({ status }: { status: string }) {
 
 export default function WebServersPage() {
   const queryClient = useQueryClient();
-  const { user } = useAuth();
+  const { user, token } = useAuth();
   const [installPanel, setInstallPanel] = useState<InstallPanelState | null>(null);
   const [nodeInstallPanel, setNodeInstallPanel] = useState<NodeInstallPanelState | null>(null);
   const [installPortalReady, setInstallPortalReady] = useState(false);
@@ -378,6 +379,7 @@ export default function WebServersPage() {
             <WebServerCard
               key={ws.id}
               ws={ws}
+              authToken={token}
               onRefresh={() => queryClient.invalidateQueries({ queryKey: ["webservers"] })}
               onInstallStream={runInstall}
               installStreamRunning={installBusy}
@@ -538,12 +540,14 @@ export default function WebServersPage() {
 
 function WebServerCard({
   ws,
+  authToken,
   onRefresh,
   onInstallStream,
   installStreamRunning,
   installStreamActiveId,
 }: {
   ws: WebServerInfo;
+  authToken: string | null;
   onRefresh: () => void;
   onInstallStream: (ws: WebServerInfo) => void;
   installStreamRunning: boolean;
@@ -551,7 +555,10 @@ function WebServerCard({
 }) {
   const colors = WS_COLORS[ws.id as WebServerType] ?? WS_COLORS.nginx;
   const [logOpen, setLogOpen] = useState(false);
+  const [analyticsOpen, setAnalyticsOpen] = useState(false);
   const [logType, setLogType] = useState<"error" | "access">("error");
+  /** Nginx: main daemon logs vs HostPanel reverse-proxy vhost (hostpanel.* — same paths CrowdSec should read on the host). */
+  const [logScope, setLogScope] = useState<"daemon" | "panel">("daemon");
   const [configTestOpen, setConfigTestOpen] = useState(false);
   const [configureOpen, setConfigureOpen] = useState(false);
   const [copiedPath, setCopiedPath] = useState<string | null>(null);
@@ -582,10 +589,15 @@ function WebServerCard({
   });
 
   const { data: logData } = useQuery({
-    queryKey: ["ws-logs", ws.id, logType],
-    queryFn: () => apiClient.get<{ data: { lines: string[] } }>(`/webservers/${ws.id}/logs?lines=150&type=${logType}`),
+    queryKey: ["ws-logs", ws.id, logType, ws.id === "nginx" ? logScope : "daemon"],
+    queryFn: () => {
+      const scopeQs = ws.id === "nginx" ? `&scope=${logScope}` : "";
+      return apiClient.get<{ data: { lines: string[]; path?: string; scope?: string } }>(
+        `/webservers/${ws.id}/logs?lines=400&type=${logType}${scopeQs}`,
+      );
+    },
     enabled: logOpen,
-    refetchInterval: logOpen ? 8000 : false,
+    refetchInterval: logOpen ? 4000 : false,
   });
 
   const { data: testData, refetch: runConfigTest, isFetching: testRunning } = useQuery({
@@ -718,6 +730,16 @@ function WebServerCard({
               Logs
               {logOpen ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
             </button>
+
+            <button
+              type="button"
+              onClick={() => setAnalyticsOpen(!analyticsOpen)}
+              className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground px-2 py-1 rounded-md hover:bg-accent transition-colors"
+            >
+              <TrendingUp className="w-3.5 h-3.5" />
+              Analytics
+              {analyticsOpen ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+            </button>
           </>
         )}
 
@@ -771,10 +793,30 @@ function WebServerCard({
       {/* Log viewer */}
       {isInstalled && logOpen && (
         <div className="mx-6 mb-4 rounded-lg border bg-[#0d1117] overflow-hidden">
-          <div className="flex items-center gap-2 px-4 py-2 bg-[#161b22] border-b border-border">
-            <Terminal className="w-3.5 h-3.5 text-muted-foreground" />
+          <div className="flex flex-wrap items-center gap-2 px-4 py-2 bg-[#161b22] border-b border-border">
+            <Terminal className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
             <span className="text-xs font-medium text-muted-foreground">{ws.name} logs</span>
-            <div className="ml-auto flex gap-1">
+            {ws.id === "nginx" && (
+              <div className="flex gap-1">
+                <button
+                  type="button"
+                  title="Main nginx error/access logs"
+                  onClick={() => setLogScope("daemon")}
+                  className={`px-2 py-0.5 text-[10px] rounded ${logScope === "daemon" ? "bg-secondary text-foreground" : "text-muted-foreground hover:bg-accent"}`}
+                >
+                  Main
+                </button>
+                <button
+                  type="button"
+                  title="HostPanel panel vhost (hostpanel.access/error.log)"
+                  onClick={() => setLogScope("panel")}
+                  className={`px-2 py-0.5 text-[10px] rounded ${logScope === "panel" ? "bg-secondary text-foreground" : "text-muted-foreground hover:bg-accent"}`}
+                >
+                  HostPanel vhost
+                </button>
+              </div>
+            )}
+            <div className="ml-auto flex gap-1 shrink-0">
               {(["error", "access"] as const).map((t) => (
                 <button key={t} onClick={() => setLogType(t)} className={`px-2 py-0.5 text-[10px] rounded ${logType === t ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}>
                   {t}
@@ -782,7 +824,12 @@ function WebServerCard({
               ))}
             </div>
           </div>
-          <div className="p-4 max-h-60 overflow-auto">
+          {logData?.data?.path && (
+            <div className="px-4 py-1.5 bg-[#0d1117] border-b border-border text-[10px] font-mono text-muted-foreground break-all">
+              {logData.data.path}
+            </div>
+          )}
+          <div className="p-4 max-h-[min(28rem,55vh)] overflow-auto">
             {!logData ? (
               <p className="text-xs text-muted-foreground">Loading...</p>
             ) : logData.data.lines.length === 0 ? (
@@ -799,6 +846,18 @@ function WebServerCard({
               ))
             )}
           </div>
+        </div>
+      )}
+
+      {isInstalled && analyticsOpen && (
+        <div className="mx-6 mb-4">
+          <WebserverAnalyticsPanel
+            enabled={analyticsOpen}
+            authToken={authToken}
+            serverId={ws.id as WebServerType}
+            nginxLogScope={ws.id === "nginx" ? logScope : undefined}
+            onNginxLogScopeChange={ws.id === "nginx" ? setLogScope : undefined}
+          />
         </div>
       )}
 

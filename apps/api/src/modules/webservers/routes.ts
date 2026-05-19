@@ -4,7 +4,11 @@ import { PassThrough } from "node:stream";
 import { promisify } from "util";
 import { requireRole } from "../../lib/auth.js";
 import { WEB_SERVER_CATALOG, type WebServerInfo, type WebServerType } from "../sites/webservers/index.js";
+import { buildAccessLogAnalytics } from "./access-log-analytics.js";
 import { runInstallNdjsonStream } from "./install-stream.js";
+import { resolveWebserverLogPath } from "./webserver-log-paths.js";
+import { gatherMergedAccessSample } from "./nginx-access-sample.js";
+import { registerWebserverLiveStream } from "./webservers-live-ws.js";
 
 const execAsync = promisify(exec);
 
@@ -211,6 +215,8 @@ const RELOAD_CMDS: Record<WebServerType, string> = {
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
 export async function webserversRoutes(app: FastifyInstance) {
+  registerWebserverLiveStream(app);
+
   // GET /api/webservers/:id/configure-info — paths & hints (before generic /:id)
   app.get("/:id/configure-info", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
     const { id } = request.params as { id: string };
@@ -396,28 +402,71 @@ export async function webserversRoutes(app: FastifyInstance) {
     return reply.send({ success: true, data: { ok: result.ok, output: result.stdout || result.stderr } });
   });
 
+  // GET /api/webservers/:id/analytics?lines=4000&scope=daemon — access log traffic / clients (parsed tail)
+  app.get("/:id/analytics", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const ws = WEB_SERVER_CATALOG.find((w) => w.id === id);
+    if (!ws) return reply.status(404).send({ success: false, error: "Unknown web server" });
+
+    const query = request.query as { lines?: string; scope?: string };
+    const n = Number(query.lines);
+    const lines = Math.min(8000, Math.max(200, Number.isFinite(n) && n > 0 ? Math.floor(n) : 4000));
+    const scope = query.scope === "panel" ? "panel" : "daemon";
+    const logPath = resolveWebserverLogPath({ id: ws.id as WebServerType, logType: "access", scope });
+    if (!logPath) return reply.status(404).send({ success: false, error: "Unknown web server" });
+
+    const useMerged =
+      scope === "daemon" && (ws.id === "nginx" || ws.id === "openresty");
+    let accessRaw: string;
+    let logPathLabel = logPath;
+    if (useMerged) {
+      const merged = await gatherMergedAccessSample(ws.id as "nginx" | "openresty", runCmd);
+      accessRaw = merged.raw;
+      logPathLabel = merged.sourceHint;
+    } else {
+      const result = await runCmd(`tail -n ${lines} ${logPath} 2>&1`);
+      accessRaw = result.stdout;
+    }
+
+    const stats = buildAccessLogAnalytics(accessRaw);
+    const note =
+      stats.parsedLines === 0 && stats.sampleLines > 0
+        ? "No lines matched the combined (nginx/apache) or JSON access format. Your stack may use a custom log_format — extend access-log-analytics if needed."
+        : stats.sampleLines === 0
+          ? "No access lines in the sampled files — generate HTTP traffic, then refresh."
+          : undefined;
+
+    return reply.send({
+      success: true,
+      data: {
+        logPath: logPathLabel,
+        scope,
+        sourceHint: useMerged ? "Merged main + per-vhost *.access.log (HostPanel sites log per domain)." : undefined,
+        ...stats,
+        note,
+      },
+    });
+  });
+
   // GET /api/webservers/:id/logs?lines=100 — tail error log
   app.get("/:id/logs", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
     const { id } = request.params as { id: string };
-    const query = request.query as { lines?: string; type?: string };
+    const ws = WEB_SERVER_CATALOG.find((w) => w.id === id);
+    if (!ws) return reply.status(404).send({ success: false, error: "Unknown web server" });
+
+    const query = request.query as { lines?: string; type?: string; scope?: string };
     const n = Number(query.lines);
     const lines = Math.min(500, Math.max(1, Number.isFinite(n) && n > 0 ? Math.floor(n) : 100));
     const logType = query.type === "access" ? "access" : "error";
+    const scope = query.scope === "panel" ? "panel" : "daemon";
 
-    const logFiles: Record<string, Record<string, string>> = {
-      nginx:      { error: "/var/log/nginx/error.log", access: "/var/log/nginx/access.log" },
-      apache2:    { error: "/var/log/apache2/error.log", access: "/var/log/apache2/access.log" },
-      lighttpd:   { error: "/var/log/lighttpd/error.log", access: "/var/log/lighttpd/access.log" },
-      litespeed:  { error: "/usr/local/lsws/logs/error.log", access: "/usr/local/lsws/logs/access.log" },
-      caddy:      { error: "/var/log/caddy/caddy.log", access: "/var/log/caddy/access.log" },
-      openresty:  { error: "/var/log/openresty/error.log", access: "/var/log/openresty/access.log" },
-      traefik:    { error: "/var/log/traefik/traefik.log", access: "/var/log/traefik/access.log" },
-    };
-
-    const logPath = logFiles[id]?.[logType];
+    const logPath = resolveWebserverLogPath({ id: ws.id as WebServerType, logType, scope });
     if (!logPath) return reply.status(404).send({ success: false, error: "Unknown web server or log type" });
 
     const result = await runCmd(`tail -n ${lines} ${logPath} 2>&1`);
-    return reply.send({ success: true, data: { lines: result.stdout.split("\n"), path: logPath } });
+    return reply.send({
+      success: true,
+      data: { lines: result.stdout.split("\n"), path: logPath, scope },
+    });
   });
 }

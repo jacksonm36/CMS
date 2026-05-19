@@ -14,9 +14,11 @@ import {
   Save,
   RefreshCw,
   Terminal,
-  Plus,
   Loader2,
 } from "lucide-react";
+import { SitePagesPanel } from "./site-pages-panel";
+import { EditorContextMenu } from "./editor-context-menu";
+import { buildFileTreeContextItems, buildFolderAreaContextItems } from "./file-tree-menu-items";
 import { toast } from "sonner";
 import { apiClient } from "@/lib/api";
 import type { Site } from "@hostpanel/types";
@@ -47,6 +49,13 @@ export function EditorShell() {
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(() => new Set());
   const [showTerminal, setShowTerminal] = useState(false);
   const [terminalHeight] = useState(200);
+  const [fileMenu, setFileMenu] = useState<{
+    x: number;
+    y: number;
+    entry: FileEntry;
+    isExpanded: boolean;
+  } | null>(null);
+  const [areaMenu, setAreaMenu] = useState<{ x: number; y: number; dirPath: string } | null>(null);
 
   const { data: sitesData } = useQuery({
     queryKey: ["sites"],
@@ -92,29 +101,30 @@ export function EditorShell() {
     },
   });
 
-  const createFileMutation = useMutation({
-    mutationFn: (path: string) => {
-      const normalized = path.startsWith("/") ? path : `/${path}`;
-      const isHtml = /\.html?$/i.test(normalized);
-      const body = isHtml
-        ? `<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="UTF-8" />\n  <meta name="viewport" content="width=device-width, initial-scale=1" />\n  <title>New page</title>\n</head>\n<body>\n  <p>Edit this page in Code or Visual mode.</p>\n</body>\n</html>\n`
-        : "";
-      return apiClient.post(`/sites/${selectedSiteId}/files/write`, { path: normalized, content: body });
-    },
-    onSuccess: async (_, path) => {
-      const normalized = path.startsWith("/") ? path : `/${path}`;
+  const deleteFileMutation = useMutation({
+    mutationFn: (path: string) =>
+      apiClient.delete<{ message: string; data?: { kind: "file" | "directory" } }>(
+        `/sites/${selectedSiteId}/files?path=${encodeURIComponent(path)}`,
+      ),
+    onSuccess: async (res, path) => {
       await queryClient.invalidateQueries({ queryKey: ["files", selectedSiteId] });
-      setCurrentFile(normalized);
-      setMode("code");
-      setIsDirty(false);
-      await queryClient.invalidateQueries({ queryKey: ["file-content", selectedSiteId, normalized] });
-      toast.success("File created", {
-        description: `${selectedSite?.rootPath ?? ""}${normalized}`,
+      await queryClient.invalidateQueries({ queryKey: ["site-pages", selectedSiteId] });
+      if (currentFile === path || currentFile.startsWith(`${path}/`)) {
+        setCurrentFile("/index.html");
+        setContent("");
+        setIsDirty(false);
+      }
+      setExpandedDirs((prev) => {
+        const next = new Set(prev);
+        for (const p of prev) {
+          if (p === path || p.startsWith(`${path}/`)) next.delete(p);
+        }
+        return next;
       });
+      const kind = (res as { data?: { kind?: "file" | "directory" } }).data?.kind;
+      toast.success(kind === "directory" ? "Folder deleted" : "File deleted");
     },
-    onError: (err: Error) => {
-      toast.error("Could not create file", { description: err.message });
-    },
+    onError: (err: Error) => toast.error("Delete failed", { description: err.message }),
   });
 
   const handleSave = useCallback(() => {
@@ -143,14 +153,197 @@ export function EditorShell() {
     return map[ext ?? ""] ?? "plaintext";
   };
 
-  const handleNewFile = useCallback(() => {
+  const canDeletePath = useCallback((path: string) => {
+    if (!path || path === "/") return false;
+    if (path === "/index.html") return false;
+    if (path === "/.hostpanel" || path.startsWith("/.hostpanel/")) return false;
+    return true;
+  }, []);
+
+  const handleDeletePath = useCallback(
+    (path: string, kind: "file" | "directory") => {
+      if (!selectedSiteId) return;
+      if (!canDeletePath(path)) {
+        toast.error(kind === "directory" ? "This folder cannot be deleted" : "This file cannot be deleted");
+        return;
+      }
+      const msg =
+        kind === "directory"
+          ? `Delete folder ${path} and everything inside?\n\nThis cannot be undone.`
+          : `Delete ${path}? This cannot be undone.`;
+      if (!window.confirm(msg)) return;
+      deleteFileMutation.mutate(path);
+    },
+    [selectedSiteId, canDeletePath, deleteFileMutation],
+  );
+
+  const openFile = useCallback((path: string, editorMode: EditorMode = "code") => {
+    setCurrentFile(path);
+    setMode(editorMode);
+  }, []);
+
+  const refreshFiles = useCallback(() => {
     if (!selectedSiteId) return;
-    const suggested = "/new-page.html";
-    const raw = window.prompt("New file path (from site root)", suggested);
-    if (raw == null || !raw.trim()) return;
-    const path = raw.trim().startsWith("/") ? raw.trim() : `/${raw.trim()}`;
-    createFileMutation.mutate(path);
-  }, [selectedSiteId, createFileMutation]);
+    void queryClient.invalidateQueries({ queryKey: ["files", selectedSiteId] });
+    void queryClient.invalidateQueries({ queryKey: ["site-pages", selectedSiteId] });
+  }, [queryClient, selectedSiteId]);
+
+  const copyToClipboard = useCallback(async (text: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success(`${label} copied`);
+    } catch {
+      toast.error("Could not copy to clipboard");
+    }
+  }, []);
+
+  const handleNewFileInDir = useCallback(
+    (dirPath: string) => {
+      if (!selectedSiteId) return;
+      const base = dirPath === "/" ? "" : dirPath.endsWith("/") ? dirPath : `${dirPath}/`;
+      const suggested = `${base}new-file.html`;
+      const raw = window.prompt("New file path (from site root)", suggested);
+      if (raw == null || !raw.trim()) return;
+      const path = raw.trim().startsWith("/") ? raw.trim() : `/${raw.trim()}`;
+      const isHtml = /\.html?$/i.test(path);
+      const body = isHtml
+        ? `<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="UTF-8" />\n  <meta name="viewport" content="width=device-width, initial-scale=1" />\n  <title>New page</title>\n</head>\n<body>\n  <p>Edit this page in the editor.</p>\n</body>\n</html>\n`
+        : "";
+      void apiClient
+        .post(`/sites/${selectedSiteId}/files/write`, { path, content: body })
+        .then(async () => {
+          await queryClient.invalidateQueries({ queryKey: ["files", selectedSiteId] });
+          openFile(path, "code");
+          toast.success("File created");
+        })
+        .catch((err: Error) => toast.error(err.message));
+    },
+    [selectedSiteId, queryClient, openFile],
+  );
+
+  const handleRenameFile = useCallback(
+    async (path: string) => {
+      if (!selectedSiteId) return;
+      const name = path.split("/").pop() ?? path;
+      const dir = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) || "/" : "/";
+      const raw = window.prompt("Rename to", name);
+      if (raw == null || !raw.trim() || raw.trim() === name) return;
+      const newPath = dir === "/" ? `/${raw.trim()}` : `${dir}/${raw.trim()}`;
+      try {
+        const res = await apiClient.get<{ data: { content: string } }>(
+          `/sites/${selectedSiteId}/files/read?path=${encodeURIComponent(path)}`,
+        );
+        await apiClient.post(`/sites/${selectedSiteId}/files/write`, {
+          path: newPath,
+          content: res.data.content,
+        });
+        await apiClient.delete(`/sites/${selectedSiteId}/files?path=${encodeURIComponent(path)}`);
+        await queryClient.invalidateQueries({ queryKey: ["files", selectedSiteId] });
+        if (currentFile === path) setCurrentFile(newPath);
+        toast.success("Renamed");
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Rename failed");
+      }
+    },
+    [selectedSiteId, queryClient, currentFile],
+  );
+
+  const handleDuplicateFile = useCallback(
+    async (path: string) => {
+      if (!selectedSiteId) return;
+      const dot = path.lastIndexOf(".");
+      const copyPath =
+        dot > 0
+          ? `${path.slice(0, dot)}-copy${path.slice(dot)}`
+          : `${path}-copy`;
+      try {
+        const res = await apiClient.get<{ data: { content: string } }>(
+          `/sites/${selectedSiteId}/files/read?path=${encodeURIComponent(path)}`,
+        );
+        await apiClient.post(`/sites/${selectedSiteId}/files/write`, {
+          path: copyPath,
+          content: res.data.content,
+        });
+        await queryClient.invalidateQueries({ queryKey: ["files", selectedSiteId] });
+        openFile(copyPath, "code");
+        toast.success("Duplicated");
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Duplicate failed");
+      }
+    },
+    [selectedSiteId, queryClient, openFile],
+  );
+
+  const handleSetupPageFromFile = useCallback(
+    async (path: string) => {
+      if (!selectedSiteId) return;
+      const m = path.match(/^\/([^/]+)\.html?$/i);
+      if (!m) return;
+      try {
+        await apiClient.post(`/sites/${selectedSiteId}/pages`, { op: "add_page", slug: m[1]!.toLowerCase() });
+        await queryClient.invalidateQueries({ queryKey: ["site-pages", selectedSiteId] });
+        await queryClient.invalidateQueries({ queryKey: ["files", selectedSiteId] });
+        toast.success(`Page set up at /${m[1]!.toLowerCase()}`);
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Could not set up page");
+      }
+    },
+    [selectedSiteId, queryClient],
+  );
+
+  const publicUrlForPath = useCallback(
+    (path: string) => {
+      const host = selectedSite?.domain?.replace(/^https?:\/\//, "") ?? "";
+      if (!host) return "";
+      if (path === "/index.html") return `https://${host}/`;
+      const folderIndex = path.match(/^\/([^/]+)\/index\.html?$/i);
+      if (folderIndex) return `https://${host}/${folderIndex[1]}/`;
+      return `https://${host}${path}`;
+    },
+    [selectedSite?.domain],
+  );
+
+  const fileMenuItems =
+    fileMenu &&
+    buildFileTreeContextItems({
+      entry: fileMenu.entry,
+      isExpanded: fileMenu.isExpanded,
+      canDelete: fileMenu.entry.type === "file" && canDeletePath(fileMenu.entry.path),
+      canDeleteFolder: fileMenu.entry.type === "directory" && canDeletePath(fileMenu.entry.path),
+      isRootHtml: /^\/[^/]+\.html?$/i.test(fileMenu.entry.path),
+      siteDomain: selectedSite?.domain,
+      onEdit: () => openFile(fileMenu.entry.path, "code"),
+      onVisual: () => openFile(fileMenu.entry.path, "visual"),
+      onPreview: () => openFile(fileMenu.entry.path, "preview"),
+      onRename: () => void handleRenameFile(fileMenu.entry.path),
+      onDuplicate: () => void handleDuplicateFile(fileMenu.entry.path),
+      onCopyPath: () => void copyToClipboard(fileMenu.entry.path, "Path"),
+      onDelete: () => handleDeletePath(fileMenu.entry.path, "file"),
+      onDeleteFolder: () => handleDeletePath(fileMenu.entry.path, "directory"),
+      onNewFile: () => handleNewFileInDir(fileMenu.entry.path),
+      onToggleDir: () => {
+        setExpandedDirs((prev) => {
+          const next = new Set(prev);
+          if (next.has(fileMenu.entry.path)) next.delete(fileMenu.entry.path);
+          else next.add(fileMenu.entry.path);
+          return next;
+        });
+      },
+      onRefresh: refreshFiles,
+      onSetupPage: () => void handleSetupPageFromFile(fileMenu.entry.path),
+      onViewLive: () => {
+        const url = publicUrlForPath(fileMenu.entry.path);
+        if (url) window.open(url, "_blank", "noopener,noreferrer");
+      },
+    });
+
+  const areaMenuItems =
+    areaMenu &&
+    buildFolderAreaContextItems({
+      dirPath: areaMenu.dirPath,
+      onNewFile: () => handleNewFileInDir(areaMenu.dirPath),
+      onRefresh: refreshFiles,
+    });
 
   return (
     <div className="flex h-full bg-background">
@@ -166,57 +359,56 @@ export function EditorShell() {
             {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
           {selectedSiteId && (
-            <div className="flex gap-1">
-              <button
-                type="button"
-                onClick={handleNewFile}
-                disabled={createFileMutation.isPending}
-                className="flex-1 flex items-center justify-center gap-1 text-[11px] font-medium rounded-md border border-border bg-secondary/40 py-1.5 hover:bg-secondary/70 disabled:opacity-50"
-              >
-                {createFileMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
-                New file
-              </button>
-              <button
-                type="button"
-                title="Refresh file list"
-                onClick={() => void queryClient.invalidateQueries({ queryKey: ["files", selectedSiteId] })}
-                className="px-2 rounded-md border border-border bg-secondary/40 hover:bg-secondary/70"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-              </button>
-            </div>
+            <button
+              type="button"
+              title="Refresh files"
+              onClick={() => {
+                void queryClient.invalidateQueries({ queryKey: ["files", selectedSiteId] });
+                void queryClient.invalidateQueries({ queryKey: ["site-pages", selectedSiteId] });
+              }}
+              className="w-full flex items-center justify-center gap-1 text-[10px] text-muted-foreground rounded-md border border-border py-1 hover:bg-secondary/50"
+            >
+              <RefreshCw className="w-3 h-3" />
+              Refresh
+            </button>
           )}
         </div>
         {selectedSiteId && (
-          <div className="border-b border-border px-3 py-2 space-y-1.5 shrink-0">
-            <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Quick open</p>
-            <div className="flex flex-wrap gap-1">
-              {["/index.html", "/styles.css", "/style.css", "/main.css", "/app.js", "/script.js"].map((p) => (
-                <button
-                  key={p}
-                  type="button"
-                  onClick={() => setCurrentFile(p)}
-                  className={cn(
-                    "text-[10px] px-1.5 py-0.5 rounded border transition-colors",
-                    currentFile === p
-                      ? "border-sky-500/60 bg-sky-500/15 text-sky-200"
-                      : "border-border/80 text-muted-foreground hover:text-foreground hover:bg-secondary/50"
-                  )}
-                >
-                  {p.replace(/^\//, "")}
-                </button>
-              ))}
-            </div>
-          </div>
+          <SitePagesPanel
+            siteId={selectedSiteId}
+            domain={selectedSite?.domain}
+            onOpenFile={(path) => {
+              setCurrentFile(path);
+              setMode("code");
+            }}
+          />
         )}
-        <div className="flex-1 overflow-auto py-1 min-h-0">
+        <p className="px-3 pt-2 pb-1 text-[10px] font-medium text-muted-foreground shrink-0">
+          Files <span className="font-normal opacity-70">· right-click</span>
+        </p>
+        <div
+          className="flex-1 overflow-auto py-1 min-h-0"
+          onContextMenu={(e) => {
+            if (!selectedSiteId) return;
+            if ((e.target as HTMLElement).closest("[data-file-row]")) return;
+            e.preventDefault();
+            setFileMenu(null);
+            setAreaMenu({ x: e.clientX, y: e.clientY, dirPath: "/" });
+          }}
+        >
           {selectedSiteId ? (
             <FileTreeBranch
               siteId={selectedSiteId}
               dirPath="/"
               depth={0}
               currentFile={currentFile}
-              onSelectFile={(path) => setCurrentFile(path)}
+              onSelectFile={(path) => openFile(path, "code")}
+              onOpenContextMenu={(entry, isExpanded, e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setAreaMenu(null);
+                setFileMenu({ x: e.clientX, y: e.clientY, entry, isExpanded });
+              }}
               expandedDirs={expandedDirs}
               onToggleDir={(path) => {
                 setExpandedDirs((prev) => {
@@ -230,6 +422,13 @@ export function EditorShell() {
           ) : null}
         </div>
       </div>
+
+      {fileMenu && fileMenuItems && (
+        <EditorContextMenu x={fileMenu.x} y={fileMenu.y} items={fileMenuItems} onClose={() => setFileMenu(null)} />
+      )}
+      {areaMenu && areaMenuItems && (
+        <EditorContextMenu x={areaMenu.x} y={areaMenu.y} items={areaMenuItems} onClose={() => setAreaMenu(null)} />
+      )}
 
       {/* Main editor area */}
       <div className="flex flex-col flex-1 min-w-0">
@@ -350,6 +549,7 @@ function FileTreeBranch({
   depth,
   currentFile,
   onSelectFile,
+  onOpenContextMenu,
   expandedDirs,
   onToggleDir,
 }: {
@@ -358,6 +558,7 @@ function FileTreeBranch({
   depth: number;
   currentFile: string;
   onSelectFile: (path: string) => void;
+  onOpenContextMenu: (entry: FileEntry, isExpanded: boolean, e: React.MouseEvent) => void;
   expandedDirs: Set<string>;
   onToggleDir: (path: string) => void;
 }) {
@@ -383,24 +584,28 @@ function FileTreeBranch({
       {!showLoader && entries.length === 0 && (
         <p className="px-4 py-2 text-xs text-muted-foreground leading-relaxed" style={{ paddingLeft: `${12 + depth * 14}px` }}>
           {depth === 0
-            ? "This folder is empty. Use Quick open, New file, or add files on the server."
+            ? "No files yet — create a page above."
             : "Empty folder."}
         </p>
       )}
       {entries.map((entry) => {
         const isExpanded = entry.type === "directory" && expandedDirs.has(entry.path);
         return (
-          <div key={entry.path}>
+          <div
+            key={entry.path}
+            data-file-row
+            className="group/row"
+          >
             <button
               type="button"
               onClick={() => {
                 if (entry.type === "directory") onToggleDir(entry.path);
                 else onSelectFile(entry.path);
               }}
+              onContextMenu={(e) => onOpenContextMenu(entry, isExpanded, e)}
               className={cn(
                 "w-full flex items-center gap-1.5 px-3 py-1 text-xs transition-colors text-left hover:bg-sidebar-accent",
-                currentFile === entry.path && entry.type === "file" && "bg-sky-500/10 text-sky-200",
-                !(currentFile === entry.path && entry.type === "file") && "text-sidebar-foreground"
+                currentFile === entry.path && entry.type === "file" ? "bg-sky-500/10 text-sky-200" : "text-sidebar-foreground",
               )}
               style={{ paddingLeft: `${12 + depth * 14}px` }}
             >
@@ -423,6 +628,7 @@ function FileTreeBranch({
                 depth={depth + 1}
                 currentFile={currentFile}
                 onSelectFile={onSelectFile}
+                onOpenContextMenu={onOpenContextMenu}
                 expandedDirs={expandedDirs}
                 onToggleDir={onToggleDir}
               />

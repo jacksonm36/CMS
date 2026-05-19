@@ -42,7 +42,9 @@ import {
 } from "./lib/security-env.js";
 import { getRedis } from "./lib/redis.js";
 import { runMigrateDeployIfEnabled } from "./lib/prisma-migrate-on-start.js";
+import { assertRedisReachable } from "./lib/redis-startup.js";
 import { warnWebAuthnDeploymentIssues } from "./modules/auth/webauthn-rp.js";
+import { fastifyTrustProxySetting } from "./lib/trusted-proxy.js";
 
 await runMigrateDeployIfEnabled();
 assertProductionSecrets();
@@ -54,7 +56,7 @@ const app = Fastify({
   logger: {
     level: process.env.LOG_LEVEL ?? "info",
   },
-  trustProxy: true,
+  trustProxy: fastifyTrustProxySetting(),
   bodyLimit: (() => {
     const n = Number(process.env.HOSTPANEL_API_BODY_LIMIT_BYTES);
     return Number.isFinite(n) && n > 0 ? n : 2 * 1024 * 1024;
@@ -66,6 +68,20 @@ app.addHook("onRequest", async (request, reply) => {
 });
 
 app.addHook("onRequest", ipBlockMiddleware);
+
+// Structured 4xx/5xx lines include client IP for CrowdSec (Pino "request completed" omits req on failures).
+app.addHook("onResponse", async (request, reply) => {
+  if (reply.statusCode < 400) return;
+  request.log.warn(
+    {
+      remoteAddress: request.ip,
+      method: request.method,
+      url: request.url,
+      statusCode: reply.statusCode,
+    },
+    "request failed",
+  );
+});
 
 // Preserve raw JSON bytes for HMAC verification (e.g. GitHub webhooks).
 app.removeContentTypeParser("application/json");
@@ -193,6 +209,7 @@ const port = Number(process.env.API_PORT ?? 4000);
 const host = process.env.API_HOST ?? "0.0.0.0";
 
 try {
+  await assertRedisReachable();
   await app.listen({ port, host });
   app.log.info(`HostPanel API running on http://${host}:${port}`);
 

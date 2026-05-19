@@ -1,0 +1,9 @@
+name: hostpanel/nodejs
+description: "HostPanel Node.js (Fastify/Next) journal logs — Pino parser + HTTP scenarios"
+author: hostpanel
+parsers:
+  - hostpanel/pino-logs
+scenarios:
+  - hostpanel/http-auth-bf
+collections:
+  - crowdsecurity/base-http-scenarios

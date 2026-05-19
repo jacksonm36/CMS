@@ -1,5 +1,7 @@
 # HostPanel — passwordless sudo for the panel API user (web servers + apt installs)
-# Site cron jobs (DB-driven) must NOT invoke sudo/apt — enforced in API (see assertSafeCronCommand).
+#
+# Site cron jobs run as this user but the API blocks sudo/apt/systemctl in cron strings — do not widen with a
+# separate "cron" sudoers profile without reviewing deploy/hostpanel.sudoers and apps/api assertSafeCronCommand.
 # Installed to /etc/sudoers.d/hostpanel by install.sh
 hostpanel ALL=(ALL) NOPASSWD: /usr/sbin/nginx, \
   /usr/sbin/apache2ctl, /usr/sbin/apachectl, \
@@ -25,4 +27,10 @@ hostpanel ALL=(ALL) NOPASSWD: /usr/sbin/nginx, \
   /bin/systemctl start traefik, /bin/systemctl stop traefik, \
   /usr/sbin/service caddy *, /usr/sbin/service openresty *, /usr/sbin/service traefik *, \
   /bin/bash /usr/local/hostpanel/bin/hostpanel-install-node.sh *, \
-  /bin/bash /opt/hostpanel/deploy/hostpanel-install-node.sh *
+  /bin/bash /opt/hostpanel/deploy/hostpanel-install-node.sh *, \
+  /usr/bin/cscli, \
+  /bin/systemctl reload crowdsec, /bin/systemctl restart crowdsec, /bin/systemctl is-active crowdsec, \
+  /bin/systemctl reload crowdsec-firewall-bouncer, /bin/systemctl restart crowdsec-firewall-bouncer, \
+  /bin/systemctl is-active crowdsec-firewall-bouncer, \
+  /usr/bin/journalctl -u crowdsec --no-pager -n *, \
+  /bin/bash /opt/hostpanel/deploy/ensure-crowdsec-hub.sh

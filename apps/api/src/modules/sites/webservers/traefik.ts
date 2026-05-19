@@ -4,7 +4,7 @@ import { appUpstreamPort } from "./proxy-port.js";
 export const TRAEFIK_DYNAMIC_DIR = process.env.TRAEFIK_DYNAMIC_DIR ?? "/etc/traefik/dynamic";
 
 /** Traefik file-provider YAML — reverse proxy only (Node/Python). */
-export function generateConfig(site: Site): string {
+export function generateConfig(site: Site, _extras?: import("./index.js").SiteWebConfigExtras): string {
   const slug = site.domain.replace(/[^a-zA-Z0-9.-]/g, "-");
   const upstream = appUpstreamPort(site);
   const routerName = `hp-${slug}`.replace(/\./g, "-");

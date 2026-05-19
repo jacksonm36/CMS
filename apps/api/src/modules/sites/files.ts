@@ -3,6 +3,8 @@ import {
   readdir,
   readFile as fsReadFile,
   writeFile as fsWriteFile,
+  unlink,
+  rm,
   stat,
   mkdir,
   realpath,
@@ -139,6 +141,7 @@ export async function listDirectory(rootPath: string, userPath: string): Promise
 
   const result: FileEntry[] = [];
   for (const entry of entries) {
+    if (entry.name === ".hostpanel") continue;
     const fullPath = join(safePath, entry.name);
     try {
       const rp = await realpath(fullPath);
@@ -225,4 +228,42 @@ export async function writeFile(rootPath: string, userPath: string, content: str
   await mkdir(dir, { recursive: true });
 
   await fsWriteFile(candidate, content, "utf-8");
+}
+
+const PROTECTED_PATHS = new Set(["/.hostpanel/routes.json"]);
+const PROTECTED_DELETE_PREFIXES = ["/.hostpanel"];
+
+function assertDeletablePath(normalized: string): void {
+  if (!normalized || normalized === "/") {
+    throw new Error("Cannot delete the site root");
+  }
+  if (PROTECTED_PATHS.has(normalized)) {
+    throw new Error("This file cannot be deleted from the editor");
+  }
+  for (const prefix of PROTECTED_DELETE_PREFIXES) {
+    if (normalized === prefix || normalized.startsWith(`${prefix}/`)) {
+      throw new Error("This path cannot be deleted");
+    }
+  }
+}
+
+/** Delete a file or folder (recursive) under the site root. */
+export async function deleteFile(
+  rootPath: string,
+  userPath: string,
+): Promise<"file" | "directory"> {
+  const normalized = userPath.startsWith("/") ? userPath : `/${userPath}`;
+  assertDeletablePath(normalized);
+  const verified = await guardPathResolved(rootPath, userPath);
+  const rootReal = await realpath(resolve(rootPath));
+  if (verified !== rootReal && !verified.startsWith(rootReal + sep)) {
+    throw new Error("Path traversal detected");
+  }
+  const st = await stat(verified);
+  if (st.isDirectory()) {
+    await rm(verified, { recursive: true, force: true });
+    return "directory";
+  }
+  await unlink(verified);
+  return "file";
 }
