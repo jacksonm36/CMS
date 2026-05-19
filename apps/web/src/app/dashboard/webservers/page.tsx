@@ -13,8 +13,15 @@ import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { postHostNodeInstallStream } from "@/lib/host-node-install-stream";
 import { WebserverAnalyticsPanel } from "@/components/webservers/webserver-analytics-panel";
+import { WebServersArchitectureDocs } from "@/components/webservers/webservers-architecture-docs";
 import { postWebserverInstallStream } from "@/lib/webserver-install-stream";
 import type { WebServerInfo, WebServerType } from "@hostpanel/types";
+
+type WebServersListResponse = {
+  data: WebServerInfo[];
+  edge?: { webServer: string; publicPort: number };
+  coexistence?: string;
+};
 
 type ConfigureInfoPayload = {
   id: string;
@@ -296,7 +303,7 @@ export default function WebServersPage() {
 
   const { data, isLoading } = useQuery({
     queryKey: ["webservers"],
-    queryFn: () => apiClient.get<{ data: WebServerInfo[] }>("/webservers"),
+    queryFn: () => apiClient.get<WebServersListResponse>("/webservers"),
     refetchInterval: 15000,
   });
 
@@ -308,8 +315,13 @@ export default function WebServersPage() {
     <div className={`space-y-6 max-w-5xl ${installPanel || nodeInstallPanel ? "pb-[min(42vh,300px)]" : ""}`}>
       <div>
         <h2 className="text-xl font-semibold">Web Servers</h2>
-        <p className="text-sm text-muted-foreground">Install, start, stop, and configure your web servers. Each site can run on a different server.</p>
+        <p className="text-sm text-muted-foreground">Install and manage multiple web servers on one host. Nginx handles public HTTP; other stacks run on dedicated loopback ports so sites can use different servers at the same time.</p>
       </div>
+
+      {!isLoading && servers.length > 0 && (
+        <WebServersArchitectureDocs servers={servers} edge={data?.edge} coexistence={data?.coexistence} />
+      )}
+
 
       <div className="rounded-xl border bg-card p-5">
         <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
@@ -388,32 +400,6 @@ export default function WebServersPage() {
           ))}
         </div>
       )}
-
-      {/* Info callouts */}
-      <div className="rounded-xl border border-primary/20 bg-primary/5 p-5 flex flex-col md:flex-row gap-6 md:gap-8">
-        <div className="flex items-start gap-3 flex-1 min-w-0">
-          <Server className="w-5 h-5 text-primary shrink-0 mt-0.5" />
-          <div className="text-sm">
-            <p className="font-medium text-primary mb-1">Edge web servers</p>
-            <p className="text-muted-foreground">
-              When creating a site, you pick one of these as the HTTP/TLS front (reverse proxy, PHP/static, etc.). Multiple servers can coexist on the host; vhosts are written to each stack&apos;s config paths automatically.
-            </p>
-          </div>
-        </div>
-        <div className="flex items-start gap-3 flex-1 min-w-0 md:border-l md:border-primary/20 md:pl-8">
-          <Code2 className="w-5 h-5 text-primary shrink-0 mt-0.5" />
-          <div className="text-sm">
-            <p className="font-medium text-primary mb-1">Node.js is not listed here on purpose</p>
-            <p className="text-muted-foreground">
-              Node.js is your <span className="text-foreground/90 font-medium">application runtime</span>, not the edge server. Create a site with{" "}
-              <span className="text-foreground/90 font-medium">Site type → Node.js</span> under{" "}
-              <Link href="/dashboard/sites" className="text-primary underline underline-offset-2 hover:text-primary/90">Sites</Link>
-              , choose a Node line and app port, then pick Nginx, Caddy, Traefik, or another server above — HostPanel generates the proxy to{" "}
-              <code className="text-xs bg-background/60 px-1 py-0.5 rounded">localhost</code> for you. Same idea for Python apps.
-            </p>
-          </div>
-        </div>
-      </div>
 
       {installPortalReady &&
         nodeInstallPanel &&
@@ -767,7 +753,11 @@ function WebServerCard({
         )}
 
         <span className="ml-auto text-xs text-muted-foreground">
-          Port {ws.defaultPort} · Config: <code className="font-mono text-[10px]">{ws.configDir}</code>
+          {ws.id === "nginx"
+            ? `Public :${ws.defaultPort}`
+            : `Backend :${ws.defaultPort} · Public via Nginx :${ws.publicPort ?? 80}`}
+          {" · "}
+          Config: <code className="font-mono text-[10px]">{ws.configDir}</code>
         </span>
       </div>
 
@@ -910,7 +900,11 @@ function WebServerCard({
                       {copiedPath === configurePayload.data.configDir ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                     </button>
                   </div>
-                  <p className="text-xs text-muted-foreground mt-2">HTTP port {configurePayload.data.defaultPort} (default).</p>
+                  <p className="text-xs text-muted-foreground mt-2">
+                    {configurePayload.data.id === "nginx"
+                      ? `Public edge port :${configurePayload.data.defaultPort}`
+                      : `Backend loopback port ${configurePayload.data.defaultPort} (public traffic via Nginx :80)`}
+                  </p>
                 </div>
 
                 <div className="space-y-2">

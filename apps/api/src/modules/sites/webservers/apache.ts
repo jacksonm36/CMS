@@ -1,6 +1,7 @@
 import type { Site } from "@hostpanel/db";
 import { indexFilenamesForSite } from "../default-document.js";
 import { appUpstreamPort } from "./proxy-port.js";
+import { backendListenPort } from "./webserver-ports.js";
 
 export const APACHE_SITES_DIR = process.env.APACHE_SITES_DIR ?? "/etc/apache2/sites-enabled";
 export const APACHE_LOG_DIR = process.env.APACHE_LOG_DIR ?? "/var/log/apache2";
@@ -9,6 +10,7 @@ export function generateConfig(site: Site, _extras?: import("./index.js").SiteWe
   const phpVersion = site.phpVersion ?? "8.2";
   const upstream = appUpstreamPort(site);
   const dirIndex = indexFilenamesForSite(site).join(" ");
+  const listenPort = backendListenPort("apache2");
 
   // PHP via mod_php or FPM proxy
   const phpFpmBlock = site.type === "php" ? `
@@ -25,8 +27,8 @@ export function generateConfig(site: Site, _extras?: import("./index.js").SiteWe
     ProxyPassReverse / http://127.0.0.1:${upstream}/`
       : "";
 
-  return `# HostPanel — managed by hostpanel (apache2)
-<VirtualHost *:80>
+  return `# HostPanel — managed by hostpanel (apache2 backend :${listenPort})
+<VirtualHost 127.0.0.1:${listenPort}>
     ServerName   ${site.domain}
     ServerAlias  www.${site.domain}
     DocumentRoot ${site.rootPath}

@@ -3,7 +3,13 @@ import { exec } from "child_process";
 import { PassThrough } from "node:stream";
 import { promisify } from "util";
 import { requireRole } from "../../lib/auth.js";
-import { WEB_SERVER_CATALOG, type WebServerInfo, type WebServerType } from "../sites/webservers/index.js";
+import {
+  WEB_SERVER_CATALOG,
+  configureWebServerCoexistence,
+  EDGE_PUBLIC_PORT,
+  type WebServerInfo,
+  type WebServerType,
+} from "../sites/webservers/index.js";
 import { buildAccessLogAnalytics } from "./access-log-analytics.js";
 import { runInstallNdjsonStream } from "./install-stream.js";
 import { resolveWebserverLogPath } from "./webserver-log-paths.js";
@@ -93,14 +99,16 @@ const CONFIGURE_INFO: Record<
       { label: "Main configuration", path: "/etc/nginx/nginx.conf" },
       { label: "Site virtual hosts", path: "/etc/nginx/sites-enabled/" },
     ],
-    notes: "After editing, use Reload in HostPanel or run nginx -t && systemctl reload nginx.",
+    notes:
+      "Public edge on :80. Sites using Nginx are served directly; other stacks are reached via hostpanel-edge-*.conf proxies.",
   },
   apache2: {
     files: [
       { label: "Apache main config", path: "/etc/apache2/apache2.conf" },
       { label: "Site virtual hosts", path: "/etc/apache2/sites-enabled/" },
     ],
-    notes: "Use apachectl configtest before reloading. .htaccess is honored in AllowOverride directories.",
+    notes:
+      "Backend only (127.0.0.1). Install configures ports.conf; nginx edge on :80 routes domains here. Use apachectl configtest before reload.",
   },
   lighttpd: {
     files: [
@@ -199,6 +207,9 @@ async function installWebServer(id: WebServerType): Promise<{ ok: boolean; outpu
   };
 
   const result = await runCmd(installCmds[id], 600_000);
+  if (result.ok) {
+    await configureWebServerCoexistence(id);
+  }
   return { ok: result.ok, output: result.ok ? result.stdout : result.stderr };
 }
 
@@ -249,7 +260,13 @@ export async function webserversRoutes(app: FastifyInstance) {
         return { ...ws, status, version };
       })
     );
-    return reply.send({ success: true, data: servers });
+    return reply.send({
+      success: true,
+      data: servers,
+      edge: { webServer: "nginx", publicPort: EDGE_PUBLIC_PORT },
+      coexistence:
+        "Nginx owns public :80. Other stacks listen on dedicated loopback ports; per-site edge vhosts proxy by domain.",
+    });
   });
 
   // GET /api/webservers/:id — single server status

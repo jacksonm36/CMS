@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import * as readline from "node:readline";
 import { PassThrough, type Readable } from "node:stream";
-import type { WebServerType } from "../sites/webservers/index.js";
+import { configureWebServerCoexistence, type WebServerType } from "../sites/webservers/index.js";
 
 const SUDO = "sudo -n";
 
@@ -180,6 +180,9 @@ export async function runInstallNdjsonStream(
         return;
       }
     }
+    write({ type: "phase", phase: "coexistence", title: "Configure loopback ports (multi-stack)", index: steps.length + 1, total: steps.length + 1 });
+    await configureWebServerCoexistence(id);
+    write({ type: "step_complete", phase: "coexistence", code: 0 });
     write({ type: "done", ok: true });
   } catch (e) {
     write({ type: "done", ok: false, error: e instanceof Error ? e.message : String(e) });

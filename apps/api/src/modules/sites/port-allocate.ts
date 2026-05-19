@@ -1,5 +1,6 @@
 import { prisma } from "@hostpanel/db";
 import { getDockerUsedPorts, PORT_ALLOC_END, PORT_ALLOC_START } from "./site-docker-isolation.js";
+import { getReservedWebServerBackendPorts } from "./webservers/webserver-ports.js";
 
 /** First free TCP port in the HostPanel allocation range, avoiding sites + Docker bindings. */
 export async function allocateHostPanelLoopbackPort(): Promise<number | null> {
@@ -17,6 +18,7 @@ export async function allocateHostPanelLoopbackPort(): Promise<number | null> {
       return out;
     }),
     ...getDockerUsedPorts(),
+    ...getReservedWebServerBackendPorts(),
   ]);
   for (let p = PORT_ALLOC_START; p <= PORT_ALLOC_END; p++) {
     if (!used.has(p)) return p;

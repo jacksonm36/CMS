@@ -15,6 +15,8 @@ http:
   routers:
     ${routerName}:
       rule: "Host(\`${site.domain}\`) || Host(\`www.${site.domain}\`)"
+      entryPoints:
+        - web
       service: ${serviceName}
   services:
     ${serviceName}:

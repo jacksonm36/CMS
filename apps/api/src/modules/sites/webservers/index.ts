@@ -2,6 +2,11 @@ import { writeFile, unlink, mkdir } from "fs/promises";
 import { dirname } from "path";
 import type { Site } from "@hostpanel/db";
 import type { SiteRoutesFile } from "../site-pages.js";
+import {
+  backendListenPort,
+  EDGE_PUBLIC_PORT,
+  needsEdgeProxy,
+} from "./webserver-ports.js";
 
 /** Single source for types, Zod, and UI enumerations */
 export const WEB_SERVER_IDS = [
@@ -38,7 +43,8 @@ async function getDriver(ws: WebServerType): Promise<WebServerDriver> {
 }
 
 export async function writeSiteConfig(site: Site): Promise<string> {
-  const driver = await getDriver(site.webServer as WebServerType);
+  const ws = site.webServer as WebServerType;
+  const driver = await getDriver(ws);
   const { readSiteRoutes } = await import("../site-pages.js");
   const routes = await readSiteRoutes(site.rootPath);
   const config = driver.generateConfig(site, { routes });
@@ -51,19 +57,43 @@ export async function writeSiteConfig(site: Site): Promise<string> {
     console.warn(`[${site.webServer}] Could not write config (non-Linux?):`, (err as Error).message);
   }
 
+  const { edgeConfigPath, generateEdgeProxyConfig } = await import("./edge-proxy.js");
+  const edgePath = edgeConfigPath(site.domain);
+
+  try {
+    if (needsEdgeProxy(ws)) {
+      const edge = generateEdgeProxyConfig(site, ws, { routes });
+      await mkdir(dirname(edgePath), { recursive: true });
+      await writeFile(edgePath, edge, "utf-8");
+    } else {
+      await unlink(edgePath).catch(() => {});
+    }
+  } catch (err) {
+    console.warn(`[edge] Could not write nginx edge proxy:`, (err as Error).message);
+  }
+
   return path;
 }
 
 export async function removeSiteConfig(site: Pick<Site, "domain" | "webServer">): Promise<void> {
-  const driver = await getDriver(site.webServer as WebServerType);
+  const ws = site.webServer as WebServerType;
+  const driver = await getDriver(ws);
   try {
     await unlink(driver.configPath(site.domain));
+  } catch {}
+  const { edgeConfigPath } = await import("./edge-proxy.js");
+  try {
+    await unlink(edgeConfigPath(site.domain));
   } catch {}
 }
 
 export async function reloadWebServer(webServer: WebServerType): Promise<void> {
   const driver = await getDriver(webServer);
   await driver.reload();
+  if (needsEdgeProxy(webServer) || webServer === "nginx") {
+    const nginx = await import("./nginx.js");
+    await nginx.reload();
+  }
 }
 
 // ─── Install / service helpers ────────────────────────────────────────────────
@@ -72,82 +102,98 @@ export interface WebServerInfo {
   id: WebServerType;
   name: string;
   description: string;
+  /** Loopback port this stack listens on (nginx uses public edge port). */
   defaultPort: number;
+  /** Public HTTP port (edge nginx). */
+  publicPort: number;
   configDir: string;
   serviceName: string;
   supportsPhp: boolean;
   supportsProxy: boolean;
 }
 
+function catalogEntry(
+  entry: Omit<WebServerInfo, "defaultPort" | "publicPort"> & { id: WebServerType }
+): WebServerInfo {
+  return {
+    ...entry,
+    defaultPort: backendListenPort(entry.id),
+    publicPort: EDGE_PUBLIC_PORT,
+  };
+}
+
 export const WEB_SERVER_CATALOG: WebServerInfo[] = [
-  {
+  catalogEntry({
     id: "nginx",
     name: "Nginx",
-    description: "High-performance event-driven web server. Ideal for static files, reverse proxy, and high concurrency.",
-    defaultPort: 80,
+    description:
+      "High-performance event-driven web server. Default public edge on :80; ideal for static files, reverse proxy, and high concurrency.",
     configDir: "/etc/nginx/sites-enabled",
     serviceName: "nginx",
     supportsPhp: true,
     supportsProxy: true,
-  },
-  {
+  }),
+  catalogEntry({
     id: "apache2",
     name: "Apache 2",
-    description: "The most widely deployed web server. Full .htaccess support, mod_rewrite, mod_php, and vast ecosystem.",
-    defaultPort: 80,
+    description:
+      "Runs on a dedicated loopback port; nginx edge on :80 routes each domain here. Full .htaccess, mod_rewrite, and mod_php.",
     configDir: "/etc/apache2/sites-enabled",
     serviceName: "apache2",
     supportsPhp: true,
     supportsProxy: true,
-  },
-  {
+  }),
+  catalogEntry({
     id: "lighttpd",
     name: "Lighttpd",
-    description: "Lightweight, fast server with low memory footprint. Great for embedded systems and high-traffic static content.",
-    defaultPort: 80,
+    description:
+      "Lightweight backend on a dedicated loopback port; nginx edge on :80 forwards traffic per site.",
     configDir: "/etc/lighttpd/conf-enabled",
     serviceName: "lighttpd",
     supportsPhp: true,
     supportsProxy: true,
-  },
-  {
+  }),
+  catalogEntry({
     id: "litespeed",
     name: "LiteSpeed Community",
-    description: "Apache-compatible high-performance server with built-in caching, LSAPI, and HTTP/3 support.",
-    defaultPort: 80,
+    description:
+      "Apache-compatible stack on a dedicated loopback port behind the nginx edge proxy.",
     configDir: "/usr/local/lsws/conf/vhosts",
     serviceName: "lsws",
     supportsPhp: true,
     supportsProxy: true,
-  },
-  {
+  }),
+  catalogEntry({
     id: "caddy",
     name: "Caddy",
-    description: "Automatic HTTPS, HTTP/3, and a concise Caddyfile. Strong choice for modern apps and simple PHP via php_fastcgi.",
-    defaultPort: 80,
+    description:
+      "Per-site Caddyfile on a loopback port; nginx edge on :80. Automatic HTTPS can be enabled in Caddy when not using the edge.",
     configDir: "/etc/caddy/conf.d",
     serviceName: "caddy",
     supportsPhp: true,
     supportsProxy: true,
-  },
-  {
+  }),
+  catalogEntry({
     id: "openresty",
     name: "OpenResty",
-    description: "Nginx + LuaJIT bundle—nginx-compatible virtual hosts with scripting and high-performance proxying.",
-    defaultPort: 80,
+    description:
+      "Nginx+Lua backend on a dedicated loopback port; public traffic enters via nginx edge on :80.",
     configDir: "/etc/openresty/nginx/sites-enabled",
     serviceName: "openresty",
     supportsPhp: true,
     supportsProxy: true,
-  },
-  {
+  }),
+  catalogEntry({
     id: "traefik",
     name: "Traefik",
-    description: "Cloud-native reverse proxy with YAML/TOML discovery. Best for Node.js/Python upstreams (file provider snippets).",
-    defaultPort: 80,
+    description:
+      "YAML dynamic config on loopback :8086; nginx edge routes Node/Python sites. Static/PHP not supported.",
     configDir: "/etc/traefik/dynamic",
     serviceName: "traefik",
     supportsPhp: false,
     supportsProxy: true,
-  },
+  }),
 ];
+
+export { backendListenPort, needsEdgeProxy, EDGE_PUBLIC_PORT } from "./webserver-ports.js";
+export { configureWebServerCoexistence } from "./configure-coexistence.js";

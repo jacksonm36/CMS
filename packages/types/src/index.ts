@@ -243,7 +243,10 @@ export interface WebServerInfo {
   id: WebServerType;
   name: string;
   description: string;
+  /** Loopback port this process listens on (nginx = public edge port). */
   defaultPort: number;
+  /** Public HTTP port (nginx edge). */
+  publicPort?: number;
   configDir: string;
   serviceName: string;
   supportsPhp: boolean;

@@ -2,6 +2,7 @@ import type { Site } from "@hostpanel/db";
 import { indexFilenamesForSite, nginxExactRootTryFiles } from "../default-document.js";
 import { nginxRedirectBlocks } from "../site-pages.js";
 import { appUpstreamPort } from "./proxy-port.js";
+import { backendListenPort } from "./webserver-ports.js";
 import type { SiteWebConfigExtras } from "./index.js";
 
 /** Debian/Ubuntu OpenResty typically mirrors nginx layout. */
@@ -14,6 +15,7 @@ export function generateConfig(site: Site, extras?: SiteWebConfigExtras): string
   const phpSocket = `/run/php/php${site.phpVersion ?? "8.2"}-fpm.sock`;
   const upstream = appUpstreamPort(site);
   const indexDirective = indexFilenamesForSite(site).join(" ");
+  const listenPort = backendListenPort("openresty");
 
   const rootExactBlock =
     site.type === "static" || site.type === "php"
@@ -61,10 +63,9 @@ export function generateConfig(site: Site, extras?: SiteWebConfigExtras): string
     }`
       : "";
 
-  return `# HostPanel — managed by hostpanel (openresty / nginx-compatible)
+  return `# HostPanel — managed by hostpanel (openresty backend :${listenPort})
 server {
-    listen 80;
-    listen [::]:80;
+    listen 127.0.0.1:${listenPort};
     server_name ${site.domain} www.${site.domain};
     root ${site.rootPath};
     index ${indexDirective};

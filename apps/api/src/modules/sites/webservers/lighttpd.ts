@@ -31,7 +31,7 @@ proxy.server = (
 )`
       : "";
 
-  return `# HostPanel — managed by hostpanel (lighttpd)
+  return `# HostPanel — managed by hostpanel (lighttpd backend; global bind 127.0.0.1 — see 10-hostpanel-port.conf)
 $HTTP["host"] =~ "^(www\\.)?${site.domain.replace(".", "\\.")}$" {
     server.document-root = "${site.rootPath}"
     server.indexfiles     = (${idxList})

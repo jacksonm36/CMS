@@ -1,6 +1,7 @@
 import type { Site } from "@hostpanel/db";
 import { sanitizeDefaultDocument } from "../default-document.js";
 import { appUpstreamPort } from "./proxy-port.js";
+import { backendListenPort } from "./webserver-ports.js";
 
 export const CADDY_CONF_D = process.env.CADDY_CONF_D ?? "/etc/caddy/conf.d";
 
@@ -13,6 +14,8 @@ export function generateConfig(site: Site, _extras?: import("./index.js").SiteWe
   const dom = escapeCaddy(site.domain);
   const phpSock = `/run/php/php${site.phpVersion ?? "8.2"}-fpm.sock`;
   const upstream = appUpstreamPort(site);
+  const listenPort = backendListenPort("caddy");
+  const bind = `127.0.0.1:${listenPort}`;
 
   const secHeaders = `
     header X-Frame-Options "SAMEORIGIN"
@@ -30,39 +33,48 @@ export function generateConfig(site: Site, _extras?: import("./index.js").SiteWe
       : "";
 
   if (site.type === "nodejs" || site.type === "python") {
-    return `# HostPanel — managed by hostpanel (caddy)
-${dom}, www.${dom} {
-    encode gzip zstd
+    return `# HostPanel — managed by hostpanel (caddy backend :${listenPort})
+${bind} {
+    @hosts host ${dom} www.${dom}
+    handle @hosts {
+        encode gzip zstd
 ${secHeaders}
-    reverse_proxy 127.0.0.1:${upstream}
+        reverse_proxy 127.0.0.1:${upstream}
+    }
 }
 `;
   }
 
   if (site.type === "php") {
     const sockPath = phpSock.replace(/^\/+/, "");
-    return `# HostPanel — managed by hostpanel (caddy)
-${dom}, www.${dom} {
-    root * ${root}
-    encode gzip zstd
+    return `# HostPanel — managed by hostpanel (caddy backend :${listenPort})
+${bind} {
+    @hosts host ${dom} www.${dom}
+    handle @hosts {
+        root * ${root}
+        encode gzip zstd
 ${secHeaders}
 ${rootRewrite}
-    php_fastcgi unix//${sockPath} {
-        root ${root}
+        php_fastcgi unix//${sockPath} {
+            root ${root}
+        }
+        file_server
     }
-    file_server
 }
 `;
   }
 
   // static
-  return `# HostPanel — managed by hostpanel (caddy)
-${dom}, www.${dom} {
-    root * ${root}
-    encode gzip zstd
+  return `# HostPanel — managed by hostpanel (caddy backend :${listenPort})
+${bind} {
+    @hosts host ${dom} www.${dom}
+    handle @hosts {
+        root * ${root}
+        encode gzip zstd
 ${secHeaders}
 ${rootRewrite}
-    file_server
+        file_server
+    }
 }
 `;
 }

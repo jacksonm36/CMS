@@ -52,3 +52,6 @@ apps/api/certs
 # Plugin uploads
 apps/api/plugins/*/
 !apps/api/plugins/.gitkeep
+deploy/*.credentials.yaml
+deploy/crowdsec-*.credentials.yaml
+crowdsec-firewall-bouncer*.deb
