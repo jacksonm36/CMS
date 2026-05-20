@@ -43,7 +43,26 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  useEffect(() => { refreshUser(); }, [refreshUser]);
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      const token = localStorage.getItem("hp_token");
+      if (!token) {
+        if (active) setState({ user: null, token: null, loading: false });
+        return;
+      }
+      try {
+        const res = await apiClient.get<{ data: User }>("/auth/me", token);
+        if (active) setState({ user: res.data, token, loading: false });
+      } catch {
+        localStorage.removeItem("hp_token");
+        if (active) setState({ user: null, token: null, loading: false });
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const login = useCallback((token: string, user: User) => {
     localStorage.setItem("hp_token", token);

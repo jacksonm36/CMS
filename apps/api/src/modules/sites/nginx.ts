@@ -1,9 +1,14 @@
 import { exec } from "child_process";
 import { promisify } from "util";
-import { writeFile, unlink, mkdir } from "fs/promises";
+import { writeFile, mkdir } from "fs/promises";
 import { join } from "path";
 import type { Site } from "@hostpanel/db";
 import { generateConfig as generateNginxSiteConfig } from "./webservers/nginx.js";
+import {
+  legacyMirrorDirsForWebServer,
+  removeLegacyMirrorDuplicateIfDifferent,
+  unlinkArtifactAndLegacyMirrors,
+} from "./webservers/legacy-mirror-dedupe.js";
 
 const execAsync = promisify(exec);
 
@@ -15,18 +20,23 @@ export function generateNginxConfig(site: Site): string {
 }
 
 export async function writeSiteConfig(domain: string, config: string): Promise<void> {
+  const path = join(NGINX_SITES_DIR, `${domain}.conf`);
   try {
     await mkdir(NGINX_SITES_DIR, { recursive: true });
-    await writeFile(join(NGINX_SITES_DIR, `${domain}.conf`), config, "utf-8");
+    await writeFile(path, config, "utf-8");
+    await removeLegacyMirrorDuplicateIfDifferent(path, legacyMirrorDirsForWebServer("nginx")).catch((e) =>
+      console.warn(`[hostpanel:dedupe] ${(e as Error).message}`),
+    );
   } catch (err) {
     console.warn("[Nginx] Could not write config (non-Linux environment?):", err);
   }
 }
 
 export async function removeSiteConfig(domain: string): Promise<void> {
-  try {
-    await unlink(join(NGINX_SITES_DIR, `${domain}.conf`));
-  } catch {}
+  await unlinkArtifactAndLegacyMirrors(
+    join(NGINX_SITES_DIR, `${domain}.conf`),
+    legacyMirrorDirsForWebServer("nginx"),
+  ).catch(() => {});
 }
 
 export async function reloadNginx(): Promise<void> {

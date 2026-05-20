@@ -1,6 +1,7 @@
 import type { Site } from "@hostpanel/db";
-import { indexFilenamesForSite } from "../default-document.js";
+import { indexFilenamesForSite, siteFilesystemWebRoot } from "../default-document.js";
 import { appUpstreamPort } from "./proxy-port.js";
+import { normalizePhpVersionForFpm } from "./php-fpm-socket.js";
 
 // LiteSpeed Community Edition uses Apache-compatible vhost syntax
 // but is typically managed via /usr/local/lsws/conf/vhosts/
@@ -8,10 +9,11 @@ export const LSWS_VHOSTS_DIR = process.env.LSWS_VHOSTS_DIR ?? "/usr/local/lsws/c
 export const LSWS_LOG_DIR = process.env.LSWS_LOG_DIR ?? "/usr/local/lsws/logs";
 
 export function generateConfig(site: Site, _extras?: import("./index.js").SiteWebConfigExtras): string {
-  const phpVersion = site.phpVersion ?? "8.2";
   const upstream = appUpstreamPort(site);
-  const phpHandler = `lsapi:/tmp/lshttpd/php${phpVersion.replace(".", "")}`;
+  const phpDigits = normalizePhpVersionForFpm(site.phpVersion).replace(".", "");
+  const phpHandler = `lsapi:/tmp/lshttpd/php${phpDigits}`;
   const idxCsv = indexFilenamesForSite(site).join(", ");
+  const docRoot = siteFilesystemWebRoot(site);
 
   const phpBlock = site.type === "php" ? `
   # PHP via LiteSpeed API (LSAPI)
@@ -33,7 +35,7 @@ export function generateConfig(site: Site, _extras?: import("./index.js").SiteWe
   return `# HostPanel — managed by hostpanel (litespeed)
 # Place this file in: ${LSWS_VHOSTS_DIR}/${site.domain}/vhconf.conf
 
-docRoot                   ${site.rootPath}
+docRoot                   ${docRoot}
 vhDomain                  ${site.domain}
 vhAliases                 www.${site.domain}
 enableGzip                1
@@ -61,7 +63,7 @@ index {
 # Security headers via .htaccess or rewrite rules
 context / {
   type                    null
-  location                ${site.rootPath}
+  location                ${docRoot}
   allowBrowse             0
   accessControl {
     allow                 *

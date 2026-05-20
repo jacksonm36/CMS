@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth-context";
@@ -200,7 +201,7 @@ export default function DashboardPage() {
         <div className="rounded-xl border bg-card">
           <div className="flex items-center justify-between p-5 pb-3">
             <h3 className="font-semibold">Recent Sites</h3>
-            <a href="/dashboard/sites" className="text-xs text-primary hover:underline">View all</a>
+            <Link href="/dashboard/sites" className="text-xs text-primary hover:underline">View all</Link>
           </div>
           <div className="divide-y divide-border">
             {sites.slice(0, 5).map((site) => (
@@ -217,7 +218,7 @@ export default function DashboardPage() {
             ))}
             {sites.length === 0 && (
               <div className="px-5 py-8 text-center text-sm text-muted-foreground">
-                No sites yet. <a href="/dashboard/sites" className="text-primary hover:underline">Create one</a>
+                No sites yet. <Link href="/dashboard/sites" className="text-primary hover:underline">Create one</Link>
               </div>
             )}
           </div>

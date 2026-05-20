@@ -1,25 +1,52 @@
 import { readdir } from "fs/promises";
-import { basename } from "path";
+import { basename, join } from "path";
 import type { Site } from "@hostpanel/db";
 
 export type SiteIndexContext = Pick<Site, "type" | "defaultDocument">;
 
-/** Safe homepage filename only (no paths). Returns null if invalid. */
+const SAFE_DOC_SEGMENT = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,100}$/;
+
+/**
+ * Safe default entry relative to the site tree (no leading `/`, no `..`).
+ * Allows a single filename (`index.php`) or one subdirectory (`web/index.php`, `public/index.php`).
+ */
 export function sanitizeDefaultDocument(raw: string | null | undefined): string | null {
   if (raw == null || typeof raw !== "string") return null;
-  const trimmed = raw.trim();
+  let trimmed = raw.trim();
   if (!trimmed) return null;
-  const name = basename(trimmed);
-  if (name !== trimmed) return null;
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,240}$/.test(name)) return null;
-  return name;
+  trimmed = trimmed.replace(/^\/+/g, "").replace(/\/+$/g, "");
+  if (!trimmed || trimmed.includes("..")) return null;
+  const parts = trimmed.split("/").filter(Boolean);
+  if (parts.length === 0 || parts.length > 8) return null;
+  for (const p of parts) {
+    if (!SAFE_DOC_SEGMENT.test(p)) return null;
+  }
+  return parts.join("/");
+}
+
+/** Subdirectory of `site.rootPath` that should be the web server document root, or null for root itself. */
+export function documentRootSuffix(defaultDocument: string | null | undefined): string | null {
+  const s = sanitizeDefaultDocument(defaultDocument);
+  if (!s) return null;
+  const i = s.lastIndexOf("/");
+  if (i <= 0) return null;
+  return s.slice(0, i);
+}
+
+/** Absolute filesystem path used as nginx/apache document root (handles `web/`, `public/`, etc.). */
+export function siteFilesystemWebRoot(site: Pick<Site, "rootPath" | "defaultDocument">): string {
+  const sub = documentRootSuffix(site.defaultDocument);
+  if (!sub) return site.rootPath;
+  return join(site.rootPath, sub);
 }
 
 /** Filenames for web server index directives / root try_files order */
 export function indexFilenamesForSite(site: SiteIndexContext): string[] {
   const custom = sanitizeDefaultDocument(site.defaultDocument);
+  const customIndexName =
+    custom && custom.includes("/") ? basename(custom) : custom;
   const ordered: string[] = [];
-  if (custom) ordered.push(custom);
+  if (customIndexName) ordered.push(customIndexName);
   ordered.push("index.html", "index.htm");
   if (site.type === "php") ordered.push("index.php");
   return [...new Set(ordered)];

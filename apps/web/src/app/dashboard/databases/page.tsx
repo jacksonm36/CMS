@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Plus, Trash2, Play, ChevronRight, ChevronDown,
@@ -23,12 +23,8 @@ export default function DatabasesPage() {
   const [selectedConn, setSelectedConn] = useState("default");
 
   const showQueryTab = !authLoading && user?.role === "superadmin";
-
-  useEffect(() => {
-    if (!authLoading && !showQueryTab && tab === "query") {
-      setTab("overview");
-    }
-  }, [authLoading, showQueryTab, tab]);
+  const activeTab: Tab =
+    !authLoading && !showQueryTab && tab === "query" ? "overview" : tab;
 
   const { data: connsData } = useQuery({
     queryKey: ["db-connections"],
@@ -76,17 +72,17 @@ export default function DatabasesPage() {
       <div className="flex gap-1 bg-secondary/50 rounded-lg p-1 w-fit">
         {tabs.map(({ id, label, icon: Icon }) => (
           <button key={id} onClick={() => setTab(id)}
-            className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-all ${tab === id ? "bg-background shadow text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+            className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-all ${activeTab === id ? "bg-background shadow text-foreground" : "text-muted-foreground hover:text-foreground"}`}
           >
             <Icon className="w-4 h-4" />{label}
           </button>
         ))}
       </div>
 
-      {tab === "overview" && <OverviewTab connectionId={selectedConn} />}
-      {tab === "browser" && <BrowserTab connectionId={selectedConn} />}
-      {tab === "query" && <QueryTab connectionId={selectedConn} />}
-      {tab === "users" && <UsersTab connectionId={selectedConn} />}
+      {activeTab === "overview" && <OverviewTab connectionId={selectedConn} />}
+      {activeTab === "browser" && <BrowserTab connectionId={selectedConn} />}
+      {activeTab === "query" && <QueryTab connectionId={selectedConn} />}
+      {activeTab === "users" && <UsersTab connectionId={selectedConn} />}
     </div>
   );
 }
@@ -376,16 +372,13 @@ function QueryTab({ connectionId }: { connectionId: string }) {
   const [result, setResult] = useState<DbQueryResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<string[]>([]);
-  const [elevationToken, setElevationToken] = useState<string | null>(null);
+  const [elevationToken, setElevationToken] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    return sessionStorage.getItem(SQL_EDITOR_ELEVATION_KEY);
+  });
   const [totpCode, setTotpCode] = useState("");
   const [elevateError, setElevateError] = useState<string | null>(null);
   const [elevating, setElevating] = useState(false);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const t = sessionStorage.getItem(SQL_EDITOR_ELEVATION_KEY);
-    if (t) setElevationToken(t);
-  }, []);
 
   function persistElevation(token: string) {
     sessionStorage.setItem(SQL_EDITOR_ELEVATION_KEY, token);

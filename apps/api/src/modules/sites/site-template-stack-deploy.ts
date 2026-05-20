@@ -9,6 +9,8 @@ import {
   sidecarContainerName,
 } from "./site-docker-isolation.js";
 import { ensureMysqlStackForSite, removeStackMysqlContainer } from "./site-stack-mysql.js";
+import { getEffectiveDeployFlags } from "../site-templates/template-deploy-flags.js";
+import { writeSiteDbEnvFile } from "./write-site-db-env.js";
 
 function sidecarStackFromSite(site: Site) {
   return {
@@ -25,36 +27,40 @@ function sidecarStackFromSite(site: Site) {
 
 /**
  * Provision directory, optional per-site Docker network + Alpine sidecar, optional MySQL on the same bridge.
- * Used by POST /api/sites/from-template when the template has deploy flags set.
  */
 export async function deployInfrastructureForTemplatedSite(
   site: Site,
-  tpl: SiteTemplate
+  tpl: SiteTemplate,
 ): Promise<{ warnings: string[] }> {
+  const flags = getEffectiveDeployFlags(tpl);
   const warnings: string[] = [];
 
   await provisionSiteDir(site.rootPath);
 
-  if (!tpl.autoDeployIsolation && !tpl.stackNetworkPerSite && !tpl.provisionDockerDb) {
+  if (!flags.autoDeployIsolation && !flags.stackNetworkPerSite && !flags.provisionDockerDb) {
     return { warnings: [] };
   }
 
   let working = site;
 
-  if (tpl.stackNetworkPerSite && !working.networkGroup) {
+  if (flags.stackNetworkPerSite && !working.networkGroup) {
     const ng = `site-${working.id}`;
     working = await prisma.site.update({ where: { id: working.id }, data: { networkGroup: ng } });
   }
 
-  if (tpl.provisionDockerDb && !working.networkGroup) {
-    warnings.push("provisionDockerDb requires a Docker network group (enable stackNetworkPerSite or set a template networkGroup).");
+  if (flags.provisionDockerDb && !working.networkGroup) {
+    warnings.push(
+      "Docker DB requires a network group — enabled per-site network automatically when possible.",
+    );
+    const ng = `site-${working.id}`;
+    working = await prisma.site.update({ where: { id: working.id }, data: { networkGroup: ng } });
   }
 
-  if (tpl.provisionDockerDb && working.networkGroup && tpl.autoDeployIsolation !== true) {
-    warnings.push("provisionDockerDb is ignored unless autoDeployIsolation is also enabled on the template.");
+  if (flags.provisionDockerDb && working.networkGroup && !flags.autoDeployIsolation) {
+    warnings.push("Docker DB works best with autoDeployIsolation (Alpine sidecar) enabled.");
   }
 
-  if (tpl.provisionDockerDb && working.networkGroup && tpl.autoDeployIsolation) {
+  if (flags.provisionDockerDb && working.networkGroup) {
     const db = await ensureMysqlStackForSite({
       siteId: working.id,
       networkGroupShort: working.networkGroup,
@@ -79,15 +85,23 @@ export async function deployInfrastructureForTemplatedSite(
             passwordHash: await bcrypt.hash(db.dbPassword, 10),
           },
         });
+        await writeSiteDbEnvFile(working.rootPath, {
+          engine: "mysql",
+          host: "127.0.0.1",
+          port: db.hostPort,
+          database: db.dbName,
+          username: db.dbUser,
+          password: db.dbPassword,
+        });
       } catch (e) {
         warnings.push(
-          `Stack MySQL started but SiteDatabase row failed: ${e instanceof Error ? e.message : String(e)}`
+          `Stack MySQL started but SiteDatabase/env file failed: ${e instanceof Error ? e.message : String(e)}`,
         );
       }
     }
   }
 
-  if (tpl.autoDeployIsolation) {
+  if (flags.autoDeployIsolation) {
     if (process.platform === "win32") {
       warnings.push("autoDeployIsolation skipped: Windows host.");
     } else {

@@ -1,11 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Loader2, Plus, Trash2, LayoutTemplate, Pencil, X, Network, Database } from "lucide-react";
+import { Loader2, Plus, Trash2, LayoutTemplate, Pencil, X, Network, Database, Rocket } from "lucide-react";
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
+import { TemplateDeployDialog } from "@/components/site-templates/template-deploy-dialog";
+import { postSiteTemplateDeployStream, type DeployStreamEvent } from "@/lib/template-deploy-stream";
 
 type SiteTemplateRow = {
   id: string;
@@ -434,6 +436,96 @@ export default function SiteTemplatesPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["site-templates"] }),
   });
 
+  const [deployTarget, setDeployTarget] = useState<SiteTemplateRow | null>(null);
+  const [deployPanel, setDeployPanel] = useState<{
+    lines: string[];
+    phase: string;
+    running: boolean;
+    ok: boolean | null;
+    error?: string;
+  } | null>(null);
+  const deployAbortRef = useRef<AbortController | null>(null);
+
+  const runDeployStream = useCallback(
+    async (templateId: string, name: string, domain: string) => {
+      deployAbortRef.current?.abort();
+      deployAbortRef.current = new AbortController();
+      const { signal } = deployAbortRef.current;
+      setDeployPanel({
+        lines: [`# HostPanel — deploy ${name}`, `# ${domain}`, ""],
+        phase: "Connecting…",
+        running: true,
+        ok: null,
+      });
+      try {
+        await postSiteTemplateDeployStream(
+          templateId,
+          { name, domain },
+          (ev: DeployStreamEvent) => {
+            setDeployPanel((prev) => {
+              if (!prev) return prev;
+              const lines = [...prev.lines];
+              const max = 700;
+              const push = (s: string) => {
+                lines.push(s);
+                if (lines.length > max) lines.splice(0, lines.length - max);
+              };
+              switch (ev.type) {
+                case "start":
+                  push(`# template ${ev.templateId}`);
+                  return { ...prev, lines, phase: "Deploy started" };
+                case "phase":
+                  push("");
+                  push(`━━ ${ev.title} (${ev.index}/${ev.total}) ━━`);
+                  return { ...prev, lines, phase: ev.title };
+                case "log":
+                  push(`${ev.source === "stderr" ? "err │ " : "    │ "}${ev.line}`);
+                  return { ...prev, lines };
+                case "step_complete":
+                  push(`    │ finished (exit ${ev.code})`);
+                  return { ...prev, lines };
+                case "done":
+                  push(ev.ok ? "━━ Deploy completed ━━" : `━━ Failed: ${ev.error ?? "unknown"} ━━`);
+                  if (ev.ok) {
+                    push("");
+                    push("Opening site…");
+                    void queryClient.invalidateQueries({ queryKey: ["sites"] });
+                    if (ev.siteId) {
+                      const newSiteId = ev.siteId;
+                      setTimeout(() => {
+                        setDeployTarget(null);
+                        setDeployPanel(null);
+                        router.push(`/dashboard/editor?siteId=${encodeURIComponent(newSiteId)}`);
+                      }, 600);
+                    }
+                  }
+                  return {
+                    ...prev,
+                    lines,
+                    phase: ev.ok ? "Complete" : "Failed",
+                    running: false,
+                    ok: ev.ok,
+                    error: ev.error,
+                  };
+                default:
+                  return prev;
+              }
+            });
+          },
+          signal,
+        );
+      } catch (e) {
+        const msg = (e as Error).name === "AbortError" ? "Cancelled" : (e as Error).message;
+        setDeployPanel((prev) =>
+          prev
+            ? { ...prev, lines: [...prev.lines, "", `!! ${msg}`], running: false, ok: false, phase: "Failed", error: msg }
+            : prev,
+        );
+      }
+    },
+    [queryClient, router],
+  );
+
   if (loading || !user) {
     return (
       <div className="flex items-center justify-center min-h-[40vh]">
@@ -446,7 +538,7 @@ export default function SiteTemplatesPage() {
   const templates = data?.data ?? [];
 
   return (
-    <div className="space-y-6 max-w-4xl">
+    <div className="space-y-6 max-w-6xl">
       <div className="flex items-center justify-between gap-4">
         <div>
           <h2 className="text-xl font-semibold flex items-center gap-2">
@@ -496,10 +588,13 @@ export default function SiteTemplatesPage() {
           No templates yet. Create one for reusable Node/PHP/Python presets.
         </p>
       ) : (
-        <ul className="rounded-xl border divide-y">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
           {templates.map((t) => (
-            <li key={t.id}>
-              <div className="p-4 flex items-start justify-between gap-4">
+            <article
+              key={t.id}
+              className="rounded-xl border bg-card p-4 flex flex-col gap-3 shadow-sm hover:border-primary/30 transition-colors"
+            >
+              <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     <p className="font-medium">{t.name}</p>
@@ -535,7 +630,7 @@ export default function SiteTemplatesPage() {
                       ? ` · home:${t.defaultDocument}`
                       : ""}
                   </p>
-                  {t.description && <p className="text-xs text-muted-foreground mt-1">{t.description}</p>}
+                  {t.description && <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{t.description}</p>}
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
                   <button type="button" title="Edit template"
@@ -553,6 +648,16 @@ export default function SiteTemplatesPage() {
                   </button>
                 </div>
               </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setDeployTarget(t);
+                  setDeployPanel(null);
+                }}
+                className="w-full h-9 rounded-md bg-primary text-primary-foreground text-sm font-medium inline-flex items-center justify-center gap-2 hover:bg-primary/90"
+              >
+                <Rocket className="w-4 h-4" /> Deploy site
+              </button>
               {editId === t.id && (
                 <div className="px-4 pb-4 space-y-4 border-t bg-secondary/10">
                   <p className="text-xs text-muted-foreground pt-3">Editing template</p>
@@ -569,10 +674,26 @@ export default function SiteTemplatesPage() {
                   {editMutation.isError && <p className="text-sm text-destructive">{(editMutation.error as Error).message}</p>}
                 </div>
               )}
-            </li>
+            </article>
           ))}
-        </ul>
+        </div>
       )}
+
+      <TemplateDeployDialog
+        template={deployTarget}
+        open={deployTarget != null}
+        onClose={() => {
+          if (deployPanel?.running) deployAbortRef.current?.abort();
+          setDeployTarget(null);
+          setDeployPanel(null);
+        }}
+        deployPanel={deployPanel}
+        canSubmit={!deployPanel?.running}
+        onDeploy={({ name, domain }) => {
+          if (!deployTarget) return;
+          void runDeployStream(deployTarget.id, name, domain);
+        }}
+      />
     </div>
   );
 }

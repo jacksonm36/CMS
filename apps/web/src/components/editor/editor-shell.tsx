@@ -65,33 +65,36 @@ export function EditorShell() {
   const [selectedSiteId, setSelectedSiteId] = useState(siteId ?? "");
 
   const sites = useMemo(() => sitesData?.data ?? [], [sitesData?.data]);
-  useEffect(() => {
-    if (!selectedSiteId && sites.length > 0) setSelectedSiteId(sites[0]!.id);
-  }, [sites, selectedSiteId]);
+  const activeSiteId = selectedSiteId || sites[0]?.id || "";
 
   const { data: fileContent, isLoading: loadingFile } = useQuery({
-    queryKey: ["file-content", selectedSiteId, currentFile],
+    queryKey: ["file-content", activeSiteId, currentFile],
     queryFn: () =>
-      apiClient.get<{ data: { content: string } }>(`/sites/${selectedSiteId}/files/read?path=${encodeURIComponent(currentFile)}`),
-    enabled: !!selectedSiteId && !!currentFile,
+      apiClient.get<{ data: { content: string } }>(`/sites/${activeSiteId}/files/read?path=${encodeURIComponent(currentFile)}`),
+    enabled: !!activeSiteId && !!currentFile,
   });
 
-  useEffect(() => {
-    if (fileContent?.data?.content !== undefined) {
-      setContent(fileContent.data.content);
-      setIsDirty(false);
-    }
-  }, [fileContent]);
+  const fileContentKey = `${activeSiteId}:${currentFile}:${loadingFile ? "loading" : (fileContent?.data?.content ?? "")}`;
 
-  const selectedSite = sites.find((s) => s.id === selectedSiteId);
+  useEffect(() => {
+    const text = fileContent?.data?.content;
+    if (text === undefined) return;
+    const frame = requestAnimationFrame(() => {
+      setContent(text);
+      setIsDirty(false);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [fileContentKey, fileContent?.data?.content]);
+
+  const selectedSite = sites.find((s) => s.id === activeSiteId);
 
   const saveMutation = useMutation({
     mutationFn: () =>
-      apiClient.post(`/sites/${selectedSiteId}/files/write`, { path: currentFile, content }),
+      apiClient.post(`/sites/${activeSiteId}/files/write`, { path: currentFile, content }),
     onSuccess: () => {
       setIsDirty(false);
-      queryClient.invalidateQueries({ queryKey: ["file-content", selectedSiteId, currentFile] });
-      void queryClient.invalidateQueries({ queryKey: ["files", selectedSiteId] });
+      queryClient.invalidateQueries({ queryKey: ["file-content", activeSiteId, currentFile] });
+      void queryClient.invalidateQueries({ queryKey: ["files", activeSiteId] });
       toast.success("File saved", {
         description: `${selectedSite?.rootPath ?? ""}${currentFile}`,
       });
@@ -104,11 +107,11 @@ export function EditorShell() {
   const deleteFileMutation = useMutation({
     mutationFn: (path: string) =>
       apiClient.delete<{ message: string; data?: { kind: "file" | "directory" } }>(
-        `/sites/${selectedSiteId}/files?path=${encodeURIComponent(path)}`,
+        `/sites/${activeSiteId}/files?path=${encodeURIComponent(path)}`,
       ),
     onSuccess: async (res, path) => {
-      await queryClient.invalidateQueries({ queryKey: ["files", selectedSiteId] });
-      await queryClient.invalidateQueries({ queryKey: ["site-pages", selectedSiteId] });
+      await queryClient.invalidateQueries({ queryKey: ["files", activeSiteId] });
+      await queryClient.invalidateQueries({ queryKey: ["site-pages", activeSiteId] });
       if (currentFile === path || currentFile.startsWith(`${path}/`)) {
         setCurrentFile("/index.html");
         setContent("");
@@ -128,8 +131,8 @@ export function EditorShell() {
   });
 
   const handleSave = useCallback(() => {
-    if (selectedSiteId && isDirty) saveMutation.mutate();
-  }, [selectedSiteId, isDirty, saveMutation]);
+    if (activeSiteId && isDirty) saveMutation.mutate();
+  }, [activeSiteId, isDirty, saveMutation]);
 
   // Keyboard shortcut
   useEffect(() => {
@@ -162,7 +165,7 @@ export function EditorShell() {
 
   const handleDeletePath = useCallback(
     (path: string, kind: "file" | "directory") => {
-      if (!selectedSiteId) return;
+      if (!activeSiteId) return;
       if (!canDeletePath(path)) {
         toast.error(kind === "directory" ? "This folder cannot be deleted" : "This file cannot be deleted");
         return;
@@ -174,7 +177,7 @@ export function EditorShell() {
       if (!window.confirm(msg)) return;
       deleteFileMutation.mutate(path);
     },
-    [selectedSiteId, canDeletePath, deleteFileMutation],
+    [activeSiteId, canDeletePath, deleteFileMutation],
   );
 
   const openFile = useCallback((path: string, editorMode: EditorMode = "code") => {
@@ -183,10 +186,10 @@ export function EditorShell() {
   }, []);
 
   const refreshFiles = useCallback(() => {
-    if (!selectedSiteId) return;
-    void queryClient.invalidateQueries({ queryKey: ["files", selectedSiteId] });
-    void queryClient.invalidateQueries({ queryKey: ["site-pages", selectedSiteId] });
-  }, [queryClient, selectedSiteId]);
+    if (!activeSiteId) return;
+    void queryClient.invalidateQueries({ queryKey: ["files", activeSiteId] });
+    void queryClient.invalidateQueries({ queryKey: ["site-pages", activeSiteId] });
+  }, [queryClient, activeSiteId]);
 
   const copyToClipboard = useCallback(async (text: string, label: string) => {
     try {
@@ -199,7 +202,7 @@ export function EditorShell() {
 
   const handleNewFileInDir = useCallback(
     (dirPath: string) => {
-      if (!selectedSiteId) return;
+      if (!activeSiteId) return;
       const base = dirPath === "/" ? "" : dirPath.endsWith("/") ? dirPath : `${dirPath}/`;
       const suggested = `${base}new-file.html`;
       const raw = window.prompt("New file path (from site root)", suggested);
@@ -210,20 +213,20 @@ export function EditorShell() {
         ? `<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="UTF-8" />\n  <meta name="viewport" content="width=device-width, initial-scale=1" />\n  <title>New page</title>\n</head>\n<body>\n  <p>Edit this page in the editor.</p>\n</body>\n</html>\n`
         : "";
       void apiClient
-        .post(`/sites/${selectedSiteId}/files/write`, { path, content: body })
+        .post(`/sites/${activeSiteId}/files/write`, { path, content: body })
         .then(async () => {
-          await queryClient.invalidateQueries({ queryKey: ["files", selectedSiteId] });
+          await queryClient.invalidateQueries({ queryKey: ["files", activeSiteId] });
           openFile(path, "code");
           toast.success("File created");
         })
         .catch((err: Error) => toast.error(err.message));
     },
-    [selectedSiteId, queryClient, openFile],
+    [activeSiteId, queryClient, openFile],
   );
 
   const handleRenameFile = useCallback(
     async (path: string) => {
-      if (!selectedSiteId) return;
+      if (!activeSiteId) return;
       const name = path.split("/").pop() ?? path;
       const dir = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) || "/" : "/";
       const raw = window.prompt("Rename to", name);
@@ -231,26 +234,26 @@ export function EditorShell() {
       const newPath = dir === "/" ? `/${raw.trim()}` : `${dir}/${raw.trim()}`;
       try {
         const res = await apiClient.get<{ data: { content: string } }>(
-          `/sites/${selectedSiteId}/files/read?path=${encodeURIComponent(path)}`,
+          `/sites/${activeSiteId}/files/read?path=${encodeURIComponent(path)}`,
         );
-        await apiClient.post(`/sites/${selectedSiteId}/files/write`, {
+        await apiClient.post(`/sites/${activeSiteId}/files/write`, {
           path: newPath,
           content: res.data.content,
         });
-        await apiClient.delete(`/sites/${selectedSiteId}/files?path=${encodeURIComponent(path)}`);
-        await queryClient.invalidateQueries({ queryKey: ["files", selectedSiteId] });
+        await apiClient.delete(`/sites/${activeSiteId}/files?path=${encodeURIComponent(path)}`);
+        await queryClient.invalidateQueries({ queryKey: ["files", activeSiteId] });
         if (currentFile === path) setCurrentFile(newPath);
         toast.success("Renamed");
       } catch (err) {
         toast.error(err instanceof Error ? err.message : "Rename failed");
       }
     },
-    [selectedSiteId, queryClient, currentFile],
+    [activeSiteId, queryClient, currentFile],
   );
 
   const handleDuplicateFile = useCallback(
     async (path: string) => {
-      if (!selectedSiteId) return;
+      if (!activeSiteId) return;
       const dot = path.lastIndexOf(".");
       const copyPath =
         dot > 0
@@ -258,37 +261,37 @@ export function EditorShell() {
           : `${path}-copy`;
       try {
         const res = await apiClient.get<{ data: { content: string } }>(
-          `/sites/${selectedSiteId}/files/read?path=${encodeURIComponent(path)}`,
+          `/sites/${activeSiteId}/files/read?path=${encodeURIComponent(path)}`,
         );
-        await apiClient.post(`/sites/${selectedSiteId}/files/write`, {
+        await apiClient.post(`/sites/${activeSiteId}/files/write`, {
           path: copyPath,
           content: res.data.content,
         });
-        await queryClient.invalidateQueries({ queryKey: ["files", selectedSiteId] });
+        await queryClient.invalidateQueries({ queryKey: ["files", activeSiteId] });
         openFile(copyPath, "code");
         toast.success("Duplicated");
       } catch (err) {
         toast.error(err instanceof Error ? err.message : "Duplicate failed");
       }
     },
-    [selectedSiteId, queryClient, openFile],
+    [activeSiteId, queryClient, openFile],
   );
 
   const handleSetupPageFromFile = useCallback(
     async (path: string) => {
-      if (!selectedSiteId) return;
+      if (!activeSiteId) return;
       const m = path.match(/^\/([^/]+)\.html?$/i);
       if (!m) return;
       try {
-        await apiClient.post(`/sites/${selectedSiteId}/pages`, { op: "add_page", slug: m[1]!.toLowerCase() });
-        await queryClient.invalidateQueries({ queryKey: ["site-pages", selectedSiteId] });
-        await queryClient.invalidateQueries({ queryKey: ["files", selectedSiteId] });
+        await apiClient.post(`/sites/${activeSiteId}/pages`, { op: "add_page", slug: m[1]!.toLowerCase() });
+        await queryClient.invalidateQueries({ queryKey: ["site-pages", activeSiteId] });
+        await queryClient.invalidateQueries({ queryKey: ["files", activeSiteId] });
         toast.success(`Page set up at /${m[1]!.toLowerCase()}`);
       } catch (err) {
         toast.error(err instanceof Error ? err.message : "Could not set up page");
       }
     },
-    [selectedSiteId, queryClient],
+    [activeSiteId, queryClient],
   );
 
   const publicUrlForPath = useCallback(
@@ -351,20 +354,20 @@ export function EditorShell() {
       <div className="w-56 border-r border-border flex flex-col bg-sidebar shrink-0">
         <div className="p-3 border-b border-border space-y-2">
           <select
-            value={selectedSiteId}
+            value={activeSiteId}
             onChange={(e) => setSelectedSiteId(e.target.value)}
             className="w-full text-xs rounded-md border border-input bg-secondary/50 px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-ring"
           >
             <option value="">Select site...</option>
             {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
-          {selectedSiteId && (
+          {activeSiteId && (
             <button
               type="button"
               title="Refresh files"
               onClick={() => {
-                void queryClient.invalidateQueries({ queryKey: ["files", selectedSiteId] });
-                void queryClient.invalidateQueries({ queryKey: ["site-pages", selectedSiteId] });
+                void queryClient.invalidateQueries({ queryKey: ["files", activeSiteId] });
+                void queryClient.invalidateQueries({ queryKey: ["site-pages", activeSiteId] });
               }}
               className="w-full flex items-center justify-center gap-1 text-[10px] text-muted-foreground rounded-md border border-border py-1 hover:bg-secondary/50"
             >
@@ -373,9 +376,9 @@ export function EditorShell() {
             </button>
           )}
         </div>
-        {selectedSiteId && (
+        {activeSiteId && (
           <SitePagesPanel
-            siteId={selectedSiteId}
+            siteId={activeSiteId}
             domain={selectedSite?.domain}
             onOpenFile={(path) => {
               setCurrentFile(path);
@@ -389,16 +392,16 @@ export function EditorShell() {
         <div
           className="flex-1 overflow-auto py-1 min-h-0"
           onContextMenu={(e) => {
-            if (!selectedSiteId) return;
+            if (!activeSiteId) return;
             if ((e.target as HTMLElement).closest("[data-file-row]")) return;
             e.preventDefault();
             setFileMenu(null);
             setAreaMenu({ x: e.clientX, y: e.clientY, dirPath: "/" });
           }}
         >
-          {selectedSiteId ? (
+          {activeSiteId ? (
             <FileTreeBranch
-              siteId={selectedSiteId}
+              siteId={activeSiteId}
               dirPath="/"
               depth={0}
               currentFile={currentFile}
@@ -512,7 +515,7 @@ export function EditorShell() {
               />
             ) : mode === "visual" ? (
               <VisualEditor
-                key={`${selectedSiteId}:${currentFile}`}
+                key={`${activeSiteId}:${currentFile}`}
                 content={content}
                 onChange={(html) => { setContent(html); setIsDirty(true); }}
               />
@@ -534,7 +537,7 @@ export function EditorShell() {
               className="border-t border-border shrink-0"
               style={{ height: terminalHeight }}
             >
-              <TerminalPane siteId={selectedSiteId} height={terminalHeight} />
+              <TerminalPane siteId={activeSiteId} height={terminalHeight} />
             </div>
           )}
         </div>

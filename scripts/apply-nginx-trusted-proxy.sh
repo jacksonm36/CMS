@@ -17,6 +17,10 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 PROXIES="${HOSTPANEL_TRUSTED_PROXY_IPS:-}"
+EXTRA="${HOSTPANEL_TRUSTED_PROXY_EXTRA:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}"
+if [[ -n "${EXTRA//[[:space:],]/}" ]]; then
+  PROXIES="${PROXIES:+$PROXIES,}$EXTRA"
+fi
 if [[ -z "${PROXIES//[[:space:],]/}" ]]; then
   if [[ -f "$OUT" ]]; then
     rm -f "$OUT"

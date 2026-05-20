@@ -13,7 +13,8 @@ import {
 import { buildAccessLogAnalytics } from "./access-log-analytics.js";
 import { runInstallNdjsonStream } from "./install-stream.js";
 import { resolveWebserverLogPath } from "./webserver-log-paths.js";
-import { gatherMergedAccessSample, gatherMergedAccessLogLines } from "./webserver-log-gather.js";
+import { gatherMergedAccessSample, gatherMergedAccessLogLines } from "./webserver-log-gather.js"
+import { buildSafeTailCmd } from "./webserver-log-shell.js";;
 import { supportsMergedDaemonLogs } from "./webserver-log-dirs.js";
 import { registerWebserverLiveStream } from "./webservers-live-ws.js";
 
@@ -26,7 +27,11 @@ const SUDO = "sudo -n";
 
 async function runCmd(cmd: string, timeoutMs = 30000): Promise<{ stdout: string; stderr: string; ok: boolean }> {
   try {
-    const { stdout, stderr } = await execAsync(cmd, { timeout: timeoutMs, maxBuffer: 20 * 1024 * 1024 });
+    const { stdout, stderr } = await execAsync(cmd, {
+      timeout: timeoutMs,
+      maxBuffer: 20 * 1024 * 1024,
+      shell: "/bin/bash",
+    });
     return { stdout: stdout.trim(), stderr: stderr.trim(), ok: true };
   } catch (err: unknown) {
     const e = err as { stdout?: string; stderr?: string; message?: string };
@@ -441,7 +446,7 @@ export async function webserversRoutes(app: FastifyInstance) {
       accessRaw = merged.raw;
       logPathLabel = merged.sourceHint;
     } else {
-      const result = await runCmd(`tail -n ${lines} ${logPath} 2>&1`);
+      const result = await runCmd(buildSafeTailCmd(lines, logPath));
       accessRaw = result.stdout;
     }
 
@@ -488,7 +493,7 @@ export async function webserversRoutes(app: FastifyInstance) {
       });
     }
 
-    const result = await runCmd(`tail -n ${lines} ${logPath} 2>&1`);
+    const result = await runCmd(buildSafeTailCmd(lines, logPath));
     return reply.send({
       success: true,
       data: { lines: result.stdout.split("\n"), path: logPath, scope },

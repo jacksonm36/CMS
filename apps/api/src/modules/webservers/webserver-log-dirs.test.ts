@@ -11,6 +11,18 @@ describe("webserver-log-dirs", () => {
     expect(daemonLogDirForServer("nginx")).toMatch(/^\/var\/log\/nginx$/);
   });
 
+  it("allows litespeed log dir under /usr/local/lsws/logs", () => {
+    expect(daemonLogDirForServer("litespeed")).toMatch(/^\/usr\/local\/lsws\/logs/);
+  });
+
+  it("rejects env log dir outside allowed roots", () => {
+    const prev = process.env.APACHE_LOG_DIR;
+    process.env.APACHE_LOG_DIR = "/etc/apache2";
+    expect(daemonLogDirForServer("apache2")).toMatch(/^\/var\/log\/apache2/);
+    if (prev === undefined) delete process.env.APACHE_LOG_DIR;
+    else process.env.APACHE_LOG_DIR = prev;
+  });
+
   it("uses openresty/nginx subdir by default", () => {
     expect(daemonLogDirForServer("openresty")).toMatch(/openresty/);
   });

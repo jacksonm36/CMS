@@ -1,4 +1,4 @@
-import { writeFile, unlink, mkdir } from "fs/promises";
+import { writeFile, mkdir } from "fs/promises";
 import { dirname } from "path";
 import type { Site } from "@hostpanel/db";
 import type { SiteRoutesFile } from "../site-pages.js";
@@ -7,6 +7,11 @@ import {
   EDGE_PUBLIC_PORT,
   needsEdgeProxy,
 } from "./webserver-ports.js";
+import {
+  legacyMirrorDirsForWebServer,
+  removeLegacyMirrorDuplicateIfDifferent,
+  unlinkArtifactAndLegacyMirrors,
+} from "./legacy-mirror-dedupe.js";
 
 /** Single source for types, Zod, and UI enumerations */
 export const WEB_SERVER_IDS = [
@@ -53,6 +58,10 @@ export async function writeSiteConfig(site: Site): Promise<string> {
   try {
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, config, "utf-8");
+    const primaryLegacyDirs = legacyMirrorDirsForWebServer(ws);
+    await removeLegacyMirrorDuplicateIfDifferent(path, primaryLegacyDirs).catch((e) =>
+      console.warn(`[hostpanel:dedupe] ${(e as Error).message}`),
+    );
   } catch (err) {
     console.warn(`[${site.webServer}] Could not write config (non-Linux?):`, (err as Error).message);
   }
@@ -65,8 +74,12 @@ export async function writeSiteConfig(site: Site): Promise<string> {
       const edge = generateEdgeProxyConfig(site, ws, { routes });
       await mkdir(dirname(edgePath), { recursive: true });
       await writeFile(edgePath, edge, "utf-8");
+      const edgeLegacyDirs = legacyMirrorDirsForWebServer("nginx");
+      await removeLegacyMirrorDuplicateIfDifferent(edgePath, edgeLegacyDirs).catch((e) =>
+        console.warn(`[hostpanel:dedupe] edge: ${(e as Error).message}`),
+      );
     } else {
-      await unlink(edgePath).catch(() => {});
+      await unlinkArtifactAndLegacyMirrors(edgePath, legacyMirrorDirsForWebServer("nginx")).catch(() => {});
     }
   } catch (err) {
     console.warn(`[edge] Could not write nginx edge proxy:`, (err as Error).message);
@@ -78,13 +91,11 @@ export async function writeSiteConfig(site: Site): Promise<string> {
 export async function removeSiteConfig(site: Pick<Site, "domain" | "webServer">): Promise<void> {
   const ws = site.webServer as WebServerType;
   const driver = await getDriver(ws);
-  try {
-    await unlink(driver.configPath(site.domain));
-  } catch {}
+  const primary = driver.configPath(site.domain);
+  await unlinkArtifactAndLegacyMirrors(primary, legacyMirrorDirsForWebServer(ws)).catch(() => {});
   const { edgeConfigPath } = await import("./edge-proxy.js");
-  try {
-    await unlink(edgeConfigPath(site.domain));
-  } catch {}
+  const edgePath = edgeConfigPath(site.domain);
+  await unlinkArtifactAndLegacyMirrors(edgePath, legacyMirrorDirsForWebServer("nginx")).catch(() => {});
 }
 
 export async function reloadWebServer(webServer: WebServerType): Promise<void> {

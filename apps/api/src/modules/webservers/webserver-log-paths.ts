@@ -1,5 +1,6 @@
 import type { WebServerType } from "../sites/webservers/index.js";
 import { daemonLogDirForServer, defaultDaemonLogFile } from "./webserver-log-dirs.js";
+import { safeAbsLogFile } from "./webserver-log-shell.js";
 
 const ENV_PREFIX: Record<WebServerType, string> = {
   nginx: "NGINX",
@@ -26,18 +27,19 @@ export function resolveWebserverLogPath(opts: {
   if (id === "nginx" && scope === "panel") {
     const k = logType === "access" ? "HOSTPANEL_NGINX_PANEL_ACCESS_LOG" : "HOSTPANEL_NGINX_PANEL_ERROR_LOG";
     const fromEnv = process.env[k]?.trim();
-    if (fromEnv) return fromEnv;
-    return PANEL_NGINX_DEFAULTS[logType];
+    const fallback = PANEL_NGINX_DEFAULTS[logType];
+    return fromEnv ? safeAbsLogFile(fromEnv, fallback) : fallback;
   }
 
   const prefix = ENV_PREFIX[id];
+  const fallback = defaultDaemonLogFile(id, logType);
   if (prefix) {
     const envKey = `HOSTPANEL_${prefix}_${logType.toUpperCase()}_LOG`;
     const fromEnv = process.env[envKey]?.trim();
-    if (fromEnv) return fromEnv;
+    if (fromEnv) return safeAbsLogFile(fromEnv, fallback);
   }
 
-  return defaultDaemonLogFile(id, logType);
+  return fallback;
 }
 
 /** Re-export for callers that need the directory (e.g. site log hints). */

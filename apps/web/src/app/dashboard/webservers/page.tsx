@@ -1,13 +1,12 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Play, Square, RefreshCw, Download, CheckCircle2, XCircle,
   AlertTriangle, Terminal, FileCode2, ChevronDown, ChevronRight,
-  Loader2, Server, Settings, Trash2, Copy, Check, Code2, TrendingUp,
+  Loader2, Settings, Trash2, Copy, Check, Code2, TrendingUp,
 } from "lucide-react";
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
@@ -16,6 +15,7 @@ import { WebserverAnalyticsPanel } from "@/components/webservers/webserver-analy
 import { WebServersArchitectureDocs } from "@/components/webservers/webservers-architecture-docs";
 import { postWebserverInstallStream } from "@/lib/webserver-install-stream";
 import type { WebServerInfo, WebServerType } from "@hostpanel/types";
+import { useIsClient } from "@/lib/use-is-client";
 
 type WebServersListResponse = {
   data: WebServerInfo[];
@@ -98,15 +98,11 @@ export default function WebServersPage() {
   const { user, token } = useAuth();
   const [installPanel, setInstallPanel] = useState<InstallPanelState | null>(null);
   const [nodeInstallPanel, setNodeInstallPanel] = useState<NodeInstallPanelState | null>(null);
-  const [installPortalReady, setInstallPortalReady] = useState(false);
+  const installPortalReady = useIsClient();
   const installAbortRef = useRef<AbortController | null>(null);
   const nodeInstallAbortRef = useRef<AbortController | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
   const nodeLogEndRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    setInstallPortalReady(true);
-  }, []);
 
   const runInstall = useCallback(
     async (ws: WebServerInfo) => {

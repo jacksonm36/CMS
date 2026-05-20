@@ -164,6 +164,10 @@ export function alpinePackagesForStack(stack: SidecarStack): string[] {
 /**
  * Fire-and-forget: install Alpine packages then log completion.
  * Network wiring already happened at container-creation time.
+ *
+ * **Concurrency:** apk uses a global DB lock in the container. Do not start another
+ * `apk add` in the same container until this finishes (e.g. template deploy streams
+ * that run `apk` in a later phase should skip calling this when a recipe will install packages).
  */
 export function provisionSidecarPackages(containerName: string, packages: string[]): void {
   if (packages.length === 0) return;

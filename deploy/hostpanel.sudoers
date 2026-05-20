@@ -33,4 +33,5 @@ hostpanel ALL=(ALL) NOPASSWD: /usr/sbin/nginx, \
   /bin/systemctl reload crowdsec-firewall-bouncer, /bin/systemctl restart crowdsec-firewall-bouncer, \
   /bin/systemctl is-active crowdsec-firewall-bouncer, \
   /usr/bin/journalctl -u crowdsec --no-pager -n *, \
-  /bin/bash /opt/hostpanel/deploy/ensure-crowdsec-hub.sh
+  /bin/bash /opt/hostpanel/deploy/ensure-crowdsec-hub.sh, \
+  /bin/bash /opt/hostpanel/scripts/hp-log-shell.sh *

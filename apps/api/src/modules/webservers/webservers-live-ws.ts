@@ -5,6 +5,7 @@ import { verifyWsJwt } from "../../lib/ws-auth.js";
 import type { WebServerType } from "../sites/webservers/index.js";
 import { buildAccessLogAnalytics } from "./access-log-analytics.js";
 import { gatherMergedAccessSample, gatherMergedAccessTail, gatherMergedErrorTail } from "./webserver-log-gather.js"
+import { buildSafeTailCmd } from "./webserver-log-shell.js";
 import { supportsMergedDaemonLogs } from "./webserver-log-dirs.js";
 import { resolveWebserverLogPath } from "./webserver-log-paths.js";
 
@@ -12,7 +13,11 @@ const execAsync = promisify(exec);
 
 async function runCmd(cmd: string, timeoutMs = 30000): Promise<{ stdout: string; ok: boolean }> {
   try {
-    const { stdout } = await execAsync(cmd, { timeout: timeoutMs, maxBuffer: 20 * 1024 * 1024 });
+    const { stdout } = await execAsync(cmd, {
+      timeout: timeoutMs,
+      maxBuffer: 20 * 1024 * 1024,
+      shell: "/bin/bash",
+    });
     return { stdout: stdout.trim(), ok: true };
   } catch (err: unknown) {
     const e = err as { stdout?: string; message?: string };
@@ -66,7 +71,7 @@ export function registerWebserverLiveStream(app: FastifyInstance): void {
           accessRaw = merged.raw;
           logPathLabel = merged.sourceHint;
         } else {
-          const accessSample = await runCmd(`tail -n 5000 ${accessPath}`);
+          const accessSample = await runCmd(buildSafeTailCmd(5000, accessPath));
           accessRaw = accessSample.stdout;
         }
         const stats = buildAccessLogAnalytics(accessRaw);
@@ -75,7 +80,7 @@ export function registerWebserverLiveStream(app: FastifyInstance): void {
         if (useMerged) {
           accessTailOut = await gatherMergedAccessTail(serverId, 45, runCmd);
         } else {
-          const accessTail = await runCmd(`tail -n 45 ${accessPath}`);
+          const accessTail = await runCmd(buildSafeTailCmd(45, accessPath));
           accessTailOut = accessTail.stdout;
         }
 
@@ -84,7 +89,7 @@ export function registerWebserverLiveStream(app: FastifyInstance): void {
           if (useMerged) {
             errorTailOut = await gatherMergedErrorTail(serverId, 30, errorPath, runCmd);
           } else {
-            const errorTail = await runCmd(`tail -n 30 ${errorPath}`);
+            const errorTail = await runCmd(buildSafeTailCmd(30, errorPath));
             errorTailOut = errorTail.stdout;
           }
         }

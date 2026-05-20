@@ -29,6 +29,17 @@ export type SiteRoutesFile = {
 
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/i;
 
+export function parseSlugFromUserInput(raw: string, domain?: string): string | null {
+  let s = raw.trim();
+  if (!s) return null;
+  s = s.replace(/^https?:\/\//i, "");
+  const host = (domain ?? "").replace(/^https?:\/\//i, "").toLowerCase();
+  if (host && s.toLowerCase().startsWith(host)) s = s.slice(host.length);
+  s = s.replace(/^\/+/, "");
+  const segment = (s.split("/").filter(Boolean)[0] ?? "").replace(/\.html?$/i, "");
+  return normalizeSlug(segment);
+}
+
 export function normalizeSlug(raw: string): string | null {
   const s = raw.trim().replace(/^\/+|\/+$/g, "").toLowerCase();
   if (!s || s === "index") return null;
@@ -246,6 +257,29 @@ export async function pruneRoutesAfterDelete(
   if (cfg.routes.length === before) return false;
   await writeSiteRoutes(rootPath, cfg);
   return true;
+}
+
+/**
+ * When the PHP app document root is a subdirectory (e.g. Drupal `web/`), the main nginx `root`
+ * no longer points at the site tree root — add `alias` locations so HostPanel editor pages
+ * under `/slug/` (files in `<siteRoot>/<slug>/`) keep working.
+ */
+export function nginxPageAliasBlocks(siteRoot: string, routes: SiteRoutesFile): string {
+  const lines: string[] = [];
+  for (const r of routes.routes) {
+    if (r.type !== "page") continue;
+    const slug = normalizeSlug(r.slug);
+    if (!slug) continue;
+    const expected = defaultPageFileForSlug(slug);
+    if (r.file !== expected) continue;
+    const esc = siteRoot.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    lines.push(`
+    location ^~ /${slug}/ {
+        alias "${esc}/${slug}/";
+        index index.html index.htm;
+    }`);
+  }
+  return lines.join("");
 }
 
 /** Nginx location blocks for redirects (exact paths). */

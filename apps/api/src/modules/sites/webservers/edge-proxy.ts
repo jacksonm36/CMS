@@ -52,8 +52,8 @@ server {
         proxy_cache_bypass $http_upgrade;
     }
 
-    access_log ${NGINX_LOG_DIR}/${domain}.edge.access.log;
-    error_log ${NGINX_LOG_DIR}/${domain}.edge.error.log;
+    access_log ${NGINX_LOG_DIR}/${domain}.edge.access.log combined;
+    error_log ${NGINX_LOG_DIR}/${domain}.edge.error.log warn;
 }
 `;
 }

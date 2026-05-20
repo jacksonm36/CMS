@@ -39,7 +39,9 @@ import {
 import { requireSiteIsolationDeploy, requireSiteReadForIsolation } from "../../lib/site-isolation-deploy.js";
 import { assertSafeCronCommand, CRON_COMMAND_MAX_LEN } from "../../lib/security-env.js";
 import { allocateHostPanelLoopbackPort } from "./port-allocate.js";
-import { deployInfrastructureForTemplatedSite, teardownStackContainers } from "./site-template-stack-deploy.js";
+import { deployInfrastructureForTemplatedSite, teardownStackContainers } from "./site-template-stack-deploy.js"
+import { assertSafeSiteDomain, siteRootPathFromDomain } from "./safe-site-domain.js";
+import { deploySiteFromTemplate } from "../site-templates/deploy-from-template.js";;
 
 /** True for site types that need an app port for the reverse proxy. */
 function typeNeedsPort(type: string): boolean {
@@ -133,74 +135,24 @@ export async function sitesRoutes(app: FastifyInstance) {
     const body = fromTemplateSchema.safeParse(request.body);
     if (!body.success) return reply.status(400).send({ success: false, error: body.error.message });
 
-    const tpl = await prisma.siteTemplate.findUnique({ where: { id: body.data.templateId } });
-    if (!tpl) return reply.status(404).send({ success: false, error: "Template not found" });
-    if (tpl.webServer === "traefik" && (tpl.type === "php" || tpl.type === "static")) {
-      return reply.status(400).send({
-        success: false,
-        error: "This template uses Traefik with PHP/static — fix the template or choose Node/Python.",
-      });
-    }
-
-    const existing = await prisma.site.findUnique({ where: { domain: body.data.domain } });
-    if (existing) return reply.status(409).send({ success: false, error: "Domain already exists" });
-
-    let ownerId = request.user.sub as string;
-    if (body.data.ownerId) {
-      const assignee = await prisma.user.findUnique({ where: { id: body.data.ownerId } });
-      if (!assignee) return reply.status(400).send({ success: false, error: "Owner user not found" });
-      ownerId = assignee.id;
-    }
-
-    // Auto-assign port if the template doesn't specify one
-    let appProxyPort = tpl.appProxyPort;
-    if (!appProxyPort && typeNeedsPort(tpl.type)) {
-      const allocated = await allocateHostPanelLoopbackPort();
-      if (!allocated) return reply.status(503).send({ success: false, error: `Port range ${PORT_ALLOC_START}–${PORT_ALLOC_END} exhausted` });
-      appProxyPort = allocated;
-    }
-
-    let inheritedDoc: string | null = tpl.defaultDocument ?? null;
-    if (inheritedDoc) inheritedDoc = sanitizeDefaultDocument(inheritedDoc);
-    if (inheritedDoc != null && tpl.type !== "static" && tpl.type !== "php") inheritedDoc = null;
-
-    const rootPath = `/var/www/${body.data.domain}`;
-    const site = await prisma.site.create({
-      data: {
-        name: body.data.name,
-        domain: body.data.domain,
-        ownerId,
-        type: tpl.type,
-        webServer: tpl.webServer,
-        phpVersion: tpl.phpVersion,
-        nodeVersion: tpl.nodeVersion,
-        pythonVersion: tpl.pythonVersion,
-        dbStackVersion: tpl.dbStackVersion,
-        appProxyPort,
-        networkGroup: tpl.networkGroup ?? null,
-        isCentralService: tpl.isCentralService ?? false,
-        templateId: tpl.id,
-        defaultDocument: inheritedDoc,
-        rootPath,
-        status: "pending",
-      },
+    const result = await deploySiteFromTemplate({
+      templateId: body.data.templateId,
+      name: body.data.name,
+      domain: body.data.domain,
+      ownerId: body.data.ownerId,
+      actorUserId: request.user.sub as string,
+      actorRole: request.user.role as string,
     });
 
-    const deployResult = await deployInfrastructureForTemplatedSite(site, tpl);
-    const fresh = await prisma.site.findUnique({ where: { id: site.id } });
-    if (!fresh) {
-      return reply.status(500).send({ success: false, error: "Site row missing after provision" });
+    if (!result.ok) {
+      return reply.status(result.status).send({ success: false, error: result.error });
     }
 
-    writeSiteConfig(fresh)
-      .then((configPath) => prisma.site.update({ where: { id: site.id }, data: { webConfigPath: configPath } }))
-      .then(() => reloadWebServer(fresh.webServer as WebServerType))
-      .then(() => prisma.site.update({ where: { id: site.id }, data: { status: "active" } }))
-      .catch(console.error);
-
-    return reply
-      .status(201)
-      .send({ success: true, data: fresh, deployWarnings: deployResult.warnings });
+    return reply.status(201).send({
+      success: true,
+      data: result.site,
+      deployWarnings: result.warnings,
+    });
   });
 
   // GET /api/sites/network-groups — list distinct group names for UI dropdowns
@@ -241,7 +193,15 @@ export async function sitesRoutes(app: FastifyInstance) {
       });
     }
 
-    const existing = await prisma.site.findUnique({ where: { domain } });
+    let safeDomain: string;
+    try {
+      safeDomain = assertSafeSiteDomain(domain);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Invalid domain";
+      return reply.status(400).send({ success: false, error: msg });
+    }
+
+    const existing = await prisma.site.findUnique({ where: { domain: safeDomain } });
     if (existing) return reply.status(409).send({ success: false, error: "Domain already exists" });
 
     // Auto-assign a conflict-free port for app types
@@ -262,11 +222,11 @@ export async function sitesRoutes(app: FastifyInstance) {
       ownerId = assignee.id;
     }
 
-    const rootPath = `/var/www/${domain}`;
+    const rootPath = siteRootPathFromDomain(safeDomain);
     const site = await prisma.site.create({
       data: {
         name,
-        domain,
+        domain: safeDomain,
         ownerId,
         type,
         webServer,
@@ -789,6 +749,7 @@ export async function sitesRoutes(app: FastifyInstance) {
       readSiteRoutes,
       writeSiteRoutes,
       normalizeSlug,
+      parseSlugFromUserInput,
       normalizeRedirectPath,
       resolveOrCreatePageFile,
       migrateRootHtmlToPageFolder,
@@ -797,7 +758,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     const cfg = await readSiteRoutes(site.rootPath);
 
     if (body.data.op === "add_page") {
-      const slug = normalizeSlug(body.data.slug);
+      const slug = parseSlugFromUserInput(body.data.slug, site.domain) ?? normalizeSlug(body.data.slug);
       if (!slug) {
         return reply.status(400).send({ success: false, error: "Invalid page name (letters, numbers, hyphens only)" });
       }
@@ -819,7 +780,7 @@ export async function sitesRoutes(app: FastifyInstance) {
         title: body.data.title?.trim() || slug,
       });
     } else if (body.data.op === "migrate_page") {
-      const slug = normalizeSlug(body.data.slug);
+      const slug = parseSlugFromUserInput(body.data.slug, site.domain) ?? normalizeSlug(body.data.slug);
       if (!slug) return reply.status(400).send({ success: false, error: "Invalid page name" });
       const file = body.data.file.startsWith("/") ? body.data.file : `/${body.data.file}`;
       const dest = await migrateRootHtmlToPageFolder(site.rootPath, slug, file);
@@ -833,7 +794,7 @@ export async function sitesRoutes(app: FastifyInstance) {
         title: slug.charAt(0).toUpperCase() + slug.slice(1),
       });
     } else if (body.data.op === "shortcut") {
-      const slug = normalizeSlug(body.data.slug);
+      const slug = parseSlugFromUserInput(body.data.slug, site.domain) ?? normalizeSlug(body.data.slug);
       if (!slug) return reply.status(400).send({ success: false, error: "Invalid page name" });
       const file = body.data.file.startsWith("/") ? body.data.file : `/${body.data.file}`;
       const to = file.endsWith(".html") || file.endsWith(".htm") ? file : file;
@@ -841,7 +802,7 @@ export async function sitesRoutes(app: FastifyInstance) {
       cfg.routes = cfg.routes.filter((r) => !(r.type === "redirect" && r.from === from));
       cfg.routes.push({ type: "redirect", from, to, permanent: true });
     } else if (body.data.op === "remove_page") {
-      const slug = normalizeSlug(body.data.slug);
+      const slug = parseSlugFromUserInput(body.data.slug, site.domain) ?? normalizeSlug(body.data.slug);
       if (!slug) return reply.status(400).send({ success: false, error: "Invalid slug" });
       cfg.routes = cfg.routes.filter((r) => !(r.type === "page" && r.slug === slug));
     } else if (body.data.op === "add_redirect") {

@@ -20,7 +20,8 @@ function isSystemMetrics(v: unknown): v is SystemMetrics {
 export function useLiveSystemMetrics(enabled: boolean, token: string | null) {
   const [metrics, setMetrics] = useState<SystemMetrics | null>(null);
   const [streamHistory, setStreamHistory] = useState<SystemMetrics[]>([]);
-  const [connected, setConnected] = useState(false);
+  const [socketConnected, setSocketConnected] = useState(false);
+  const connected = Boolean(enabled && token && socketConnected);
   const [lastError, setLastError] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -46,7 +47,6 @@ export function useLiveSystemMetrics(enabled: boolean, token: string | null) {
 
   useEffect(() => {
     if (!enabled || !token) {
-      setConnected(false);
       return;
     }
 
@@ -79,7 +79,7 @@ export function useLiveSystemMetrics(enabled: boolean, token: string | null) {
       ws.onopen = () => {
         if (cancelled) return;
         attemptRef.current = 0;
-        setConnected(true);
+        setSocketConnected(true);
         setLastError(null);
       };
 
@@ -101,7 +101,7 @@ export function useLiveSystemMetrics(enabled: boolean, token: string | null) {
 
       ws.onclose = () => {
         if (cancelled) return;
-        setConnected(false);
+        setSocketConnected(false);
         scheduleReconnect();
       };
     }
@@ -113,7 +113,7 @@ export function useLiveSystemMetrics(enabled: boolean, token: string | null) {
       clearReconnect();
       wsRef.current?.close();
       wsRef.current = null;
-      setConnected(false);
+      setSocketConnected(false);
     };
   }, [enabled, token, pushHistory]);
 

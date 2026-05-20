@@ -8,11 +8,14 @@ import { OPENRESTY_LOG_DIR } from "../sites/webservers/openresty.js";
 const CADDY_LOG_DIR_DEFAULT = "/var/log/caddy";
 const TRAEFIK_LOG_DIR_DEFAULT = "/var/log/traefik";
 
-/** Absolute log directory only — rejects traversal and odd paths. */
+const ALLOWED_LOG_PREFIXES = ["/var/log/", "/usr/local/lsws/logs/"] as const;
+
+/** Absolute log directory only — rejects traversal and paths outside known log roots. */
 export function safeAbsLogDir(raw: string | undefined, fallback: string): string {
   const d = (raw ?? fallback).trim();
   if (!d.startsWith("/") || d.includes("..") || d.length > 512) return fallback;
   if (!/^\/[a-zA-Z0-9/_.+-]+$/.test(d)) return fallback;
+  if (!ALLOWED_LOG_PREFIXES.some((p) => d.startsWith(p))) return fallback;
   return d;
 }
 

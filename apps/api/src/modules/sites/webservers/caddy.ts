@@ -1,7 +1,9 @@
 import type { Site } from "@hostpanel/db";
-import { sanitizeDefaultDocument } from "../default-document.js";
+import { basename } from "path";
+import { sanitizeDefaultDocument, siteFilesystemWebRoot } from "../default-document.js";
 import { appUpstreamPort } from "./proxy-port.js";
 import { backendListenPort } from "./webserver-ports.js";
+import { pickWorkingPhpFpmSocket } from "./php-fpm-socket.js";
 
 export const CADDY_CONF_D = process.env.CADDY_CONF_D ?? "/etc/caddy/conf.d";
 
@@ -10,9 +12,10 @@ function escapeCaddy(s: string): string {
 }
 
 export function generateConfig(site: Site, _extras?: import("./index.js").SiteWebConfigExtras): string {
-  const root = escapeCaddy(site.rootPath);
+  const webRootFs = siteFilesystemWebRoot(site);
+  const root = escapeCaddy(webRootFs);
   const dom = escapeCaddy(site.domain);
-  const phpSock = `/run/php/php${site.phpVersion ?? "8.2"}-fpm.sock`;
+  const phpSock = pickWorkingPhpFpmSocket(site.phpVersion ?? "8.2");
   const upstream = appUpstreamPort(site);
   const listenPort = backendListenPort("caddy");
   const bind = `127.0.0.1:${listenPort}`;
@@ -22,7 +25,13 @@ export function generateConfig(site: Site, _extras?: import("./index.js").SiteWe
     header X-Content-Type-Options "nosniff"
     header Referrer-Policy "strict-origin-when-cross-origin"`;
 
-  const customHome = sanitizeDefaultDocument(site.defaultDocument);
+  const customRaw = sanitizeDefaultDocument(site.defaultDocument);
+  const customHome =
+    customRaw && (site.type === "static" || site.type === "php")
+      ? customRaw.includes("/")
+        ? basename(customRaw)
+        : customRaw
+      : null;
   const rootRewrite =
     customHome && (site.type === "static" || site.type === "php")
       ? `

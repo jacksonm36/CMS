@@ -6,6 +6,7 @@ import { ChevronDown, ChevronRight, Copy, ExternalLink, Globe, Home, Loader2, Pe
 import { toast } from "sonner";
 import { apiClient } from "@/lib/api";
 import { EditorContextMenu, type EditorContextMenuItem } from "./editor-context-menu";
+import { isValidPageSlug, parsePageSlugInput } from "@/lib/page-slug";
 
 export type SiteRouteEntry =
   | { type: "page"; slug: string; file: string; title?: string }
@@ -51,7 +52,7 @@ export function SitePagesPanel({
 
   const domainHost = data?.data.domain ?? domain ?? "your-site";
   const routes = data?.data.routes ?? [];
-  const discovered = data?.data.discovered ?? [];
+  const discovered = useMemo(() => data?.data.discovered ?? [], [data?.data.discovered]);
 
   const pageRoutes = routes.filter((r): r is Extract<SiteRouteEntry, { type: "page" }> => r.type === "page");
   const redirectRoutes = routes.filter(
@@ -156,6 +157,20 @@ export function SitePagesPanel({
   }, [discovered, pageRoutes, redirectRoutes]);
 
   const baseUrl = `https://${domainHost.replace(/^https?:\/\//, "")}`;
+  const domainLabel = domainHost.replace(/^https?:\/\//, "");
+
+  const QUICK_PAGE_SLUGS = ["info", "about", "contact"] as const;
+  const canCreatePage = isValidPageSlug(newName.trim());
+  const previewUrl = canCreatePage ? `${baseUrl}/${newName.trim()}` : null;
+
+  function submitNewPage() {
+    const slug = newName.trim();
+    if (!isValidPageSlug(slug)) {
+      toast.error("Enter a valid page name (e.g. info, about-us)");
+      return;
+    }
+    mutate.mutate({ op: "add_page", slug });
+  }
 
   function buildPageMenuItems(item: PageItem): EditorContextMenuItem[] {
     const liveUrl = `${baseUrl}${item.isHome ? "/" : item.urlPath}`;
@@ -237,35 +252,73 @@ export function SitePagesPanel({
       <div>
         <p className="text-xs font-medium text-foreground">Website pages</p>
         <p className="text-[10px] text-muted-foreground mt-0.5 leading-relaxed">
-          Each page lives in its own folder:{" "}
-          <span className="font-mono text-foreground/80">/main/index.html</span> →{" "}
-          <span className="font-mono text-foreground/80">yoursite.com/main</span>.
-          Old files like <span className="font-mono">main.html</span> in the root are moved automatically when you
-          create or set up a page.
+          Type a page name (e.g. <span className="font-mono text-foreground/90">info</span>) and click Create — visitors
+          open <span className="font-mono text-foreground/90">{domainLabel || "yoursite.com"}/info</span>. You can paste{" "}
+          <span className="font-mono">/info</span> or the full URL too.
         </p>
       </div>
 
-      <div className="flex rounded-md border border-input bg-background overflow-hidden text-xs shadow-sm">
-        <span className="px-2 py-2.5 text-muted-foreground bg-secondary/50 shrink-0 border-r border-border max-w-[7.5rem] truncate">
-          /
-        </span>
-        <input
-          value={newName}
-          onChange={(e) => setNewName(e.target.value.replace(/[^a-zA-Z0-9-]/g, "").toLowerCase())}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && newName.trim()) mutate.mutate({ op: "add_page", slug: newName.trim() });
-          }}
-          placeholder="main"
-          className="flex-1 min-w-0 px-2 py-2.5 bg-transparent outline-none font-mono"
-        />
-        <button
-          type="button"
-          disabled={!newName.trim() || mutate.isPending}
-          onClick={() => mutate.mutate({ op: "add_page", slug: newName.trim() })}
-          className="px-3.5 py-2.5 bg-sky-600 text-white font-semibold hover:bg-sky-500 disabled:opacity-40 shrink-0"
-        >
-          Create
-        </button>
+      <div className="space-y-1.5">
+        <div className="flex rounded-md border border-input bg-background overflow-hidden text-xs shadow-sm">
+          <span
+            className="px-2 py-2.5 text-muted-foreground bg-secondary/50 shrink-0 border-r border-border max-w-[9rem] truncate font-mono text-[10px]"
+            title={domainLabel}
+          >
+            {domainLabel}/
+          </span>
+          <input
+            value={newName}
+            onChange={(e) => setNewName(parsePageSlugInput(e.target.value, domainHost))}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") submitNewPage();
+            }}
+            placeholder="info"
+            className="flex-1 min-w-0 px-2 py-2.5 bg-transparent outline-none font-mono"
+            aria-label="Page name"
+          />
+          <button
+            type="button"
+            disabled={!canCreatePage || mutate.isPending}
+            onClick={() => submitNewPage()}
+            className="px-3.5 py-2.5 bg-sky-600 text-white font-semibold hover:bg-sky-500 disabled:opacity-40 shrink-0"
+          >
+            Create
+          </button>
+        </div>
+        {previewUrl ? (
+          <p className="text-[10px] text-muted-foreground pl-0.5">
+            Opens at{" "}
+            <a
+              href={previewUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-mono text-sky-400 hover:underline"
+            >
+              {previewUrl.replace(/^https?:\/\//, "")}
+            </a>
+          </p>
+        ) : newName.trim() ? (
+          <p className="text-[10px] text-amber-500/90 pl-0.5">
+            Use letters, numbers, and hyphens only (not &quot;index&quot;).
+          </p>
+        ) : null}
+        <div className="flex flex-wrap gap-1.5">
+          {QUICK_PAGE_SLUGS.map((slug) => {
+            const exists = items.some((i) => i.pageSlug === slug);
+            return (
+              <button
+                key={slug}
+                type="button"
+                disabled={exists || mutate.isPending}
+                title={exists ? "Page already exists" : `Create /${slug}`}
+                onClick={() => mutate.mutate({ op: "add_page", slug })}
+                className="text-[10px] px-2 py-1 rounded-md border border-border bg-background hover:bg-accent disabled:opacity-40 font-medium"
+              >
+                + {slug}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       <div className="space-y-1">

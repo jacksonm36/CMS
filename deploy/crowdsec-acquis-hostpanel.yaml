@@ -5,6 +5,7 @@
 poll_without_inotify: true
 filenames:
   - /var/log/nginx/*.access.log
+  # includes per-site and *.edge.access.log (multi-stack public traffic)
   - /var/log/nginx/*.error.log
 labels:
   type: nginx

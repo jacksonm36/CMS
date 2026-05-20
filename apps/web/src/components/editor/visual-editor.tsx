@@ -63,7 +63,10 @@ export function VisualEditor({ content, onChange }: VisualEditorProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<{ destroy: () => void } | null>(null);
   const onChangeRef = useRef(onChange);
-  onChangeRef.current = onChange;
+
+  useEffect(() => {
+    onChangeRef.current = onChange;
+  }, [onChange]);
 
   useEffect(() => {
     if (!containerRef.current) return;

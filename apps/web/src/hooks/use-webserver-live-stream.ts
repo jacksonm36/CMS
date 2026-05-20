@@ -33,16 +33,16 @@ export function useWebserverLiveStream(opts: {
 }) {
   const { enabled, token, serverId, scope } = opts;
   const [payload, setPayload] = useState<WebserverLiveMessage | null>(null);
-  const [connected, setConnected] = useState(false);
+  const [socketConnected, setSocketConnected] = useState(false);
+  const streamActive = enabled && token && LIVE_SERVER_IDS.has(serverId);
+  const connected = Boolean(streamActive && socketConnected);
   const [error, setError] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attemptRef = useRef(0);
 
   useEffect(() => {
-    if (!enabled || !token || !LIVE_SERVER_IDS.has(serverId)) {
-      setConnected(false);
-      setPayload(null);
+    if (!streamActive) {
       return;
     }
 
@@ -75,7 +75,7 @@ export function useWebserverLiveStream(opts: {
       ws.onopen = () => {
         if (cancelled) return;
         attemptRef.current = 0;
-        setConnected(true);
+        setSocketConnected(true);
         setError(null);
       };
 
@@ -102,7 +102,7 @@ export function useWebserverLiveStream(opts: {
 
       ws.onclose = () => {
         if (cancelled) return;
-        setConnected(false);
+        setSocketConnected(false);
         scheduleReconnect();
       };
     }
@@ -114,9 +114,11 @@ export function useWebserverLiveStream(opts: {
       clearRt();
       wsRef.current?.close();
       wsRef.current = null;
-      setConnected(false);
+      setSocketConnected(false);
     };
-  }, [enabled, token, serverId, scope]);
+  }, [streamActive, token, serverId, scope]);
 
-  return { payload, connected, error };
+  const displayPayload = streamActive ? payload : null;
+
+  return { payload: displayPayload, connected, error };
 }

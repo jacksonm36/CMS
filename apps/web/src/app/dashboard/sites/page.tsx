@@ -780,6 +780,7 @@ function SiteCard({
 
       {homepageOpen && (site.type === "static" || site.type === "php") && (
         <HomepageFileDialog
+          key={`${site.id}:${site.defaultDocument ?? ""}`}
           site={site}
           onClose={() => setHomepageOpen(false)}
           isSaving={homepageMutation.isPending}
@@ -792,6 +793,7 @@ function SiteCard({
       )}
       {stackOpen && (
         <SiteStackDialog
+          key={`${site.id}:${site.type}:${site.phpVersion ?? ""}:${site.nodeVersion ?? ""}:${site.pythonVersion ?? ""}:${site.dbStackVersion ?? ""}:${site.appProxyPort ?? ""}`}
           site={site}
           catalog={catalog}
           onClose={() => setStackOpen(false)}
@@ -824,10 +826,6 @@ function HomepageFileDialog({
   detectError: Error | null;
 }) {
   const [filename, setFilename] = useState(site.defaultDocument ?? "");
-
-  useEffect(() => {
-    setFilename(site.defaultDocument ?? "");
-  }, [site.defaultDocument]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -907,15 +905,6 @@ function SiteStackDialog({
   const [pythonVersion, setPythonVersion] = useState(site.pythonVersion ?? "3.12");
   const [dbStackVersion, setDbStackVersion] = useState(site.dbStackVersion ?? "postgresql-16");
   const [appProxyPort, setAppProxyPort] = useState(site.appProxyPort ?? 3000);
-
-  useEffect(() => {
-    setType(site.type);
-    setPhpVersion(site.phpVersion ?? "8.2");
-    setNodeVersion(site.nodeVersion ?? "20");
-    setPythonVersion(site.pythonVersion ?? "3.12");
-    setDbStackVersion(site.dbStackVersion ?? "postgresql-16");
-    setAppProxyPort(site.appProxyPort ?? 3000);
-  }, [site]);
 
   const phpList = catalog?.phpVersions ?? ["8.4", "8.3", "8.2", "8.1", "8.0"];
   const nodeList = catalog?.nodeVersions ?? ["24", "22", "20", "18"];

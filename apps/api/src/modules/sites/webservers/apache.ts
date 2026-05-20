@@ -1,22 +1,25 @@
 import type { Site } from "@hostpanel/db";
-import { indexFilenamesForSite } from "../default-document.js";
+import { indexFilenamesForSite, siteFilesystemWebRoot } from "../default-document.js";
 import { appUpstreamPort } from "./proxy-port.js";
 import { backendListenPort } from "./webserver-ports.js";
+import { pickWorkingPhpFpmSocket } from "./php-fpm-socket.js";
+import { assertSafeHostname } from "./edge-proxy.js";
 
 export const APACHE_SITES_DIR = process.env.APACHE_SITES_DIR ?? "/etc/apache2/sites-enabled";
 export const APACHE_LOG_DIR = process.env.APACHE_LOG_DIR ?? "/var/log/apache2";
 
 export function generateConfig(site: Site, _extras?: import("./index.js").SiteWebConfigExtras): string {
-  const phpVersion = site.phpVersion ?? "8.2";
+  const phpSock = pickWorkingPhpFpmSocket(site.phpVersion ?? "8.2");
   const upstream = appUpstreamPort(site);
   const dirIndex = indexFilenamesForSite(site).join(" ");
   const listenPort = backendListenPort("apache2");
+  const docRoot = siteFilesystemWebRoot(site);
 
   // PHP via mod_php or FPM proxy
   const phpFpmBlock = site.type === "php" ? `
     # PHP-FPM via proxy
     <FilesMatch "\\.php$">
-        SetHandler "proxy:unix:/run/php/php${phpVersion}-fpm.sock|fcgi://localhost"
+        SetHandler "proxy:unix:${phpSock}|fcgi://localhost"
     </FilesMatch>` : "";
 
   const proxyBlock =
@@ -31,9 +34,9 @@ export function generateConfig(site: Site, _extras?: import("./index.js").SiteWe
 <VirtualHost 127.0.0.1:${listenPort}>
     ServerName   ${site.domain}
     ServerAlias  www.${site.domain}
-    DocumentRoot ${site.rootPath}
+    DocumentRoot ${docRoot}
 
-    <Directory ${site.rootPath}>
+    <Directory ${docRoot}>
         DirectoryIndex ${dirIndex}
         Options -Indexes +FollowSymLinks
         AllowOverride All
@@ -65,7 +68,7 @@ export function generateConfig(site: Site, _extras?: import("./index.js").SiteWe
 }
 
 export function configPath(domain: string): string {
-  return `${APACHE_SITES_DIR}/${domain}.conf`;
+  return `${APACHE_SITES_DIR}/${assertSafeHostname(domain)}.conf`;
 }
 
 export async function reload(): Promise<void> {

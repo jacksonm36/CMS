@@ -157,7 +157,6 @@ export default function DockerPage() {
   });
 
   const [portsTarget, setPortsTarget] = useState<{ ref: string; name: string } | null>(null);
-  const [editedPorts, setEditedPorts] = useState<PortBinding[]>([]);
   const [portsError, setPortsError] = useState<string | null>(null);
 
   const inspectQuery = useQuery({
@@ -183,17 +182,7 @@ export default function DockerPage() {
   const openPortsModal = useCallback((ref: string, name: string) => {
     setPortsError(null);
     setPortsTarget({ ref, name });
-    setEditedPorts([]);
   }, []);
-
-  // Sync editedPorts when inspect data loads
-  useEffect(() => {
-    if (inspectQuery.data?.data) {
-      setEditedPorts(inspectQuery.data.data.portBindings.length > 0
-        ? inspectQuery.data.data.portBindings
-        : []);
-    }
-  }, [inspectQuery.data]);
 
   if (authLoading || !user || !canUseDocker) {
     return (
@@ -622,100 +611,18 @@ export default function DockerPage() {
                       <span />
                     </div>
 
-                    {editedPorts.map((pb, i) => (
-                      <div key={i} className="grid grid-cols-[1fr_1fr_1fr_auto] gap-2 items-center">
-                        <input
-                          type="number"
-                          min={1}
-                          max={65535}
-                          value={pb.hostPort}
-                          onChange={(e) => {
-                            const next = [...editedPorts];
-                            next[i] = { ...next[i]!, hostPort: e.target.value };
-                            setEditedPorts(next);
-                            setPortsError(null);
-                          }}
-                          placeholder="e.g. 8080"
-                          className="px-2 py-1.5 rounded-md border border-border bg-background text-sm font-mono focus:outline-none focus:ring-1 focus:ring-primary"
-                        />
-                        <input
-                          type="text"
-                          value={pb.containerPort}
-                          onChange={(e) => {
-                            const next = [...editedPorts];
-                            next[i] = { ...next[i]!, containerPort: e.target.value };
-                            setEditedPorts(next);
-                            setPortsError(null);
-                          }}
-                          placeholder="e.g. 80/tcp"
-                          className="px-2 py-1.5 rounded-md border border-border bg-background text-sm font-mono focus:outline-none focus:ring-1 focus:ring-primary"
-                        />
-                        <input
-                          type="text"
-                          value={pb.hostIp === "0.0.0.0" ? "" : pb.hostIp}
-                          onChange={(e) => {
-                            const next = [...editedPorts];
-                            next[i] = { ...next[i]!, hostIp: e.target.value || "0.0.0.0" };
-                            setEditedPorts(next);
-                            setPortsError(null);
-                          }}
-                          placeholder="0.0.0.0"
-                          className="px-2 py-1.5 rounded-md border border-border bg-background text-sm font-mono focus:outline-none focus:ring-1 focus:ring-primary"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setEditedPorts(editedPorts.filter((_, j) => j !== i))}
-                          className="p-1.5 rounded-md border border-destructive/40 text-destructive hover:bg-destructive/10"
-                          title="Remove this binding"
-                        >
-                          <X className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    ))}
-
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setEditedPorts([...editedPorts, { hostPort: "", containerPort: "80/tcp", hostIp: "0.0.0.0" }])
-                      }
-                      className="flex items-center gap-1.5 text-xs px-2 py-1.5 rounded-md border border-dashed border-border hover:bg-secondary text-muted-foreground"
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                      Add port binding
-                    </button>
-                  </div>
-
-                  {portsError ? (
-                    <div className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-                      <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-                      {portsError}
-                    </div>
-                  ) : null}
-
-                  <div className="flex justify-end gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => setPortsTarget(null)}
-                      className="px-3 py-1.5 text-sm rounded-md border border-border hover:bg-secondary"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      disabled={portsMutation.isPending}
-                      onClick={() => {
+                    <ContainerPortsBindingsEditor
+                      key={inspectQuery.dataUpdatedAt ?? "loading"}
+                      initialBindings={inspectQuery.data?.data?.portBindings ?? []}
+                      portsError={portsError}
+                      onClearError={() => setPortsError(null)}
+                      onCancel={() => setPortsTarget(null)}
+                      isPending={portsMutation.isPending}
+                      onApply={(bindings) => {
                         setPortsError(null);
-                        portsMutation.mutate({ ref: portsTarget.ref, portBindings: editedPorts });
+                        portsMutation.mutate({ ref: portsTarget.ref, portBindings: bindings });
                       }}
-                      className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
-                    >
-                      {portsMutation.isPending ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <Save className="w-3.5 h-3.5" />
-                      )}
-                      Apply &amp; recreate
-                    </button>
+                    />
                   </div>
                 </>
               )}
@@ -724,5 +631,117 @@ export default function DockerPage() {
         </div>
       ) : null}
     </div>
+  );
+}
+
+function ContainerPortsBindingsEditor({
+  initialBindings,
+  portsError,
+  onClearError,
+  onCancel,
+  isPending,
+  onApply,
+}: {
+  initialBindings: PortBinding[];
+  portsError: string | null;
+  onClearError: () => void;
+  onCancel: () => void;
+  isPending: boolean;
+  onApply: (bindings: PortBinding[]) => void;
+}) {
+  const [editedPorts, setEditedPorts] = useState<PortBinding[]>(
+    initialBindings.length > 0 ? initialBindings : [],
+  );
+
+  return (
+    <>
+      {editedPorts.map((pb, i) => (
+        <div key={i} className="grid grid-cols-[1fr_1fr_1fr_auto] gap-2 items-center">
+          <input
+            type="number"
+            min={1}
+            max={65535}
+            value={pb.hostPort}
+            onChange={(e) => {
+              const next = [...editedPorts];
+              next[i] = { ...next[i]!, hostPort: e.target.value };
+              setEditedPorts(next);
+              onClearError();
+            }}
+            placeholder="e.g. 8080"
+            className="px-2 py-1.5 rounded-md border border-border bg-background text-sm font-mono focus:outline-none focus:ring-1 focus:ring-primary"
+          />
+          <input
+            type="text"
+            value={pb.containerPort}
+            onChange={(e) => {
+              const next = [...editedPorts];
+              next[i] = { ...next[i]!, containerPort: e.target.value };
+              setEditedPorts(next);
+              onClearError();
+            }}
+            placeholder="e.g. 80/tcp"
+            className="px-2 py-1.5 rounded-md border border-border bg-background text-sm font-mono focus:outline-none focus:ring-1 focus:ring-primary"
+          />
+          <input
+            type="text"
+            value={pb.hostIp === "0.0.0.0" ? "" : pb.hostIp}
+            onChange={(e) => {
+              const next = [...editedPorts];
+              next[i] = { ...next[i]!, hostIp: e.target.value || "0.0.0.0" };
+              setEditedPorts(next);
+              onClearError();
+            }}
+            placeholder="0.0.0.0"
+            className="px-2 py-1.5 rounded-md border border-border bg-background text-sm font-mono focus:outline-none focus:ring-1 focus:ring-primary"
+          />
+          <button
+            type="button"
+            onClick={() => setEditedPorts(editedPorts.filter((_, j) => j !== i))}
+            className="p-1.5 rounded-md border border-destructive/40 text-destructive hover:bg-destructive/10"
+            title="Remove this binding"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      ))}
+
+      <button
+        type="button"
+        onClick={() =>
+          setEditedPorts([...editedPorts, { hostPort: "", containerPort: "80/tcp", hostIp: "0.0.0.0" }])
+        }
+        className="flex items-center gap-1.5 text-xs px-2 py-1.5 rounded-md border border-dashed border-border hover:bg-secondary text-muted-foreground"
+      >
+        <Plus className="w-3.5 h-3.5" />
+        Add port binding
+      </button>
+
+      {portsError ? (
+        <div className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+          <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+          {portsError}
+        </div>
+      ) : null}
+
+      <div className="flex justify-end gap-2 pt-1">
+        <button
+          type="button"
+          onClick={onCancel}
+          className="px-3 py-1.5 text-sm rounded-md border border-border hover:bg-secondary"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          disabled={isPending}
+          onClick={() => onApply(editedPorts)}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
+        >
+          {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+          Apply &amp; recreate
+        </button>
+      </div>
+    </>
   );
 }
