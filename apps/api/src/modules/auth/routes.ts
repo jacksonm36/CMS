@@ -16,8 +16,23 @@ import { recordFailedLogin, clearFailedLogins, isLoginIdentifierThrottled, recor
 import { getRedis } from "../../lib/redis.js";
 import { consumeLoginIdentifierBudget } from "../../lib/login-identifier-rate-limit.js";
 import { requireAuth, requireRole, signSqlEditorElevationToken } from "../../lib/auth.js";
+import {
+  canAssignRole,
+  canDeleteUser,
+  canEditUser,
+  normalizeDockerAccess,
+} from "../../lib/user-permissions.js";
 import { HP_TOKEN_COOKIE } from "../../lib/ws-auth.js";
 import { getRpConfig } from "./passkey.js";
+
+async function countSuperadmins(excludeId?: string): Promise<number> {
+  return prisma.user.count({
+    where: {
+      role: "superadmin",
+      ...(excludeId ? { NOT: { id: excludeId } } : {}),
+    },
+  });
+}
 
 /** Accepts email addresses including single-label hosts like admin@localhost */
 function isValidLoginEmail(val: string) {
@@ -58,8 +73,9 @@ const updateProfileSchema = z.object({
 const adminCreateUserSchema = z.object({
   email: z.string().email(),
   name: z.string().min(1).max(100).trim(),
-  password: z.string().min(8),
+  password: z.string().min(8).max(200),
   role: z.enum(["superadmin", "admin", "editor", "viewer"]),
+  dockerAccess: z.boolean().optional(),
 });
 
 const adminUpdateUserSchema = z.object({
@@ -67,6 +83,7 @@ const adminUpdateUserSchema = z.object({
   email: z.string().email().optional(),
   role: z.enum(["superadmin", "admin", "editor", "viewer"]).optional(),
   dockerAccess: z.boolean().optional(),
+  password: z.string().min(8).max(200).optional(),
 }).refine((d) => Object.values(d).some((v) => v !== undefined), {
   message: "Provide at least one field to update",
 });
@@ -253,10 +270,79 @@ export async function authRoutes(app: FastifyInstance) {
   // GET /api/auth/users — panel accounts (assign sites to customers)
   app.get("/users", { preHandler: requireRole("superadmin", "admin") }, async (_request, reply) => {
     const users = await prisma.user.findMany({
-      select: { id: true, email: true, name: true, role: true, dockerAccess: true, createdAt: true },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        dockerAccess: true,
+        twoFactorEnabled: true,
+        createdAt: true,
+        updatedAt: true,
+        _count: { select: { sites: true } },
+      },
       orderBy: { email: "asc" },
     });
-    return reply.send({ success: true, data: users });
+    return reply.send({
+      success: true,
+      data: users.map((u) => ({
+        id: u.id,
+        email: u.email,
+        name: u.name,
+        role: u.role,
+        dockerAccess: u.dockerAccess,
+        twoFactorEnabled: u.twoFactorEnabled,
+        createdAt: u.createdAt,
+        updatedAt: u.updatedAt,
+        siteCount: u._count.sites,
+      })),
+    });
+  });
+
+  // GET /api/auth/users/:id — single user (admin)
+  app.get("/users/:id", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const actor = request.user as { sub: string; role: Role };
+
+    const user = await prisma.user.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        dockerAccess: true,
+        twoFactorEnabled: true,
+        createdAt: true,
+        updatedAt: true,
+        _count: { select: { sites: true, webAuthnCredentials: true } },
+      },
+    });
+    if (!user) return reply.status(404).send({ success: false, error: "User not found" });
+
+    if (
+      actor.role === "admin" &&
+      (user.role === "superadmin" || user.role === "admin") &&
+      actor.sub !== user.id
+    ) {
+      return reply.status(403).send({ success: false, error: "Insufficient permissions to view this user" });
+    }
+
+    return reply.send({
+      success: true,
+      data: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        dockerAccess: user.dockerAccess,
+        twoFactorEnabled: user.twoFactorEnabled,
+        createdAt: user.createdAt,
+        updatedAt: user.updatedAt,
+        siteCount: user._count.sites,
+        passkeyCount: user._count.webAuthnCredentials,
+      },
+    });
   });
 
   // GET /api/auth/me
@@ -370,12 +456,14 @@ export async function authRoutes(app: FastifyInstance) {
     const body = adminCreateUserSchema.safeParse(request.body);
     if (!body.success) return reply.status(400).send({ success: false, error: body.error.issues[0]?.message ?? "Invalid request" });
 
-    const { email, name, password, role } = body.data;
-    const actor = request.user;
+    const { email, name, password, role, dockerAccess } = body.data;
+    const actor = request.user as { sub: string; role: Role };
 
-    // Admins cannot create superadmins
-    if (role === "superadmin" && actor.role !== "superadmin") {
-      return reply.status(403).send({ success: false, error: "Only superadmins can create superadmin accounts" });
+    if (!canAssignRole(actor.role, role)) {
+      return reply.status(403).send({
+        success: false,
+        error: `Your role cannot create accounts with role "${role}"`,
+      });
     }
 
     const existing = await prisma.user.findUnique({ where: { email } });
@@ -383,7 +471,13 @@ export async function authRoutes(app: FastifyInstance) {
 
     const passwordHash = await bcrypt.hash(password, 12);
     const user = await prisma.user.create({
-      data: { email, name, passwordHash, role },
+      data: {
+        email,
+        name,
+        passwordHash,
+        role,
+        dockerAccess: normalizeDockerAccess(role, dockerAccess),
+      },
       select: { id: true, email: true, name: true, role: true, dockerAccess: true, createdAt: true },
     });
 
@@ -396,19 +490,31 @@ export async function authRoutes(app: FastifyInstance) {
     const body = adminUpdateUserSchema.safeParse(request.body);
     if (!body.success) return reply.status(400).send({ success: false, error: body.error.issues[0]?.message ?? "Invalid request" });
 
-    const actor = request.user;
-
-    // Cannot demote/promote to superadmin unless you are one
-    if (body.data.role === "superadmin" && actor.role !== "superadmin") {
-      return reply.status(403).send({ success: false, error: "Only superadmins can assign the superadmin role" });
-    }
+    const actor = request.user as { sub: string; role: Role };
 
     const target = await prisma.user.findUnique({ where: { id } });
     if (!target) return reply.status(404).send({ success: false, error: "User not found" });
 
-    // Admins cannot edit superadmins
-    if (target.role === "superadmin" && actor.role !== "superadmin") {
+    if (!canEditUser(actor, { id: target.id, role: target.role })) {
       return reply.status(403).send({ success: false, error: "Insufficient permissions to modify this user" });
+    }
+
+    if (body.data.role !== undefined && !canAssignRole(actor.role, body.data.role)) {
+      return reply.status(403).send({
+        success: false,
+        error: `Your role cannot assign role "${body.data.role}"`,
+      });
+    }
+
+    const nextRole = body.data.role ?? target.role;
+    if (target.role === "superadmin" && nextRole !== "superadmin") {
+      const others = await countSuperadmins(target.id);
+      if (others === 0) {
+        return reply.status(400).send({
+          success: false,
+          error: "Cannot demote the last superadmin account",
+        });
+      }
     }
 
     if (body.data.email) {
@@ -416,36 +522,91 @@ export async function authRoutes(app: FastifyInstance) {
       if (conflict) return reply.status(409).send({ success: false, error: "Email already in use" });
     }
 
+    const data: {
+      name?: string;
+      email?: string;
+      role?: Role;
+      dockerAccess?: boolean;
+      passwordHash?: string;
+    } = {};
+    if (body.data.name !== undefined) data.name = body.data.name;
+    if (body.data.email !== undefined) data.email = body.data.email;
+    if (body.data.role !== undefined) data.role = body.data.role;
+    if (body.data.dockerAccess !== undefined || body.data.role !== undefined) {
+      data.dockerAccess = normalizeDockerAccess(
+        nextRole,
+        body.data.dockerAccess ?? target.dockerAccess,
+      );
+    }
+    if (body.data.password) {
+      data.passwordHash = await bcrypt.hash(body.data.password, 12);
+    }
+
     const user = await prisma.user.update({
       where: { id },
-      data: {
-        ...(body.data.name !== undefined ? { name: body.data.name } : {}),
-        ...(body.data.email !== undefined ? { email: body.data.email } : {}),
-        ...(body.data.role !== undefined ? { role: body.data.role } : {}),
-        ...(body.data.dockerAccess !== undefined ? { dockerAccess: body.data.dockerAccess } : {}),
-      },
-      select: { id: true, email: true, name: true, role: true, dockerAccess: true, createdAt: true },
+      data,
+      select: { id: true, email: true, name: true, role: true, dockerAccess: true, createdAt: true, updatedAt: true },
     });
 
     return reply.send({ success: true, data: user });
   });
 
-  // DELETE /api/auth/users/:id — admin deletes a user
+  // DELETE /api/auth/users/:id — admin deletes a user (?transferSitesTo=<userId> if they own sites)
   app.delete("/users/:id", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
     const { id } = request.params as { id: string };
-    const actor = request.user;
+    const query = request.query as { transferSitesTo?: string };
+    const actor = request.user as { sub: string; role: Role };
 
-    if (id === actor.sub) return reply.status(400).send({ success: false, error: "You cannot delete your own account" });
+    if (id === actor.sub) {
+      return reply.status(400).send({ success: false, error: "You cannot delete your own account" });
+    }
 
     const target = await prisma.user.findUnique({ where: { id } });
     if (!target) return reply.status(404).send({ success: false, error: "User not found" });
 
-    if (target.role === "superadmin" && actor.role !== "superadmin") {
-      return reply.status(403).send({ success: false, error: "Only superadmins can delete superadmin accounts" });
+    if (!canDeleteUser(actor, { id: target.id, role: target.role })) {
+      return reply.status(403).send({ success: false, error: "Insufficient permissions to delete this user" });
+    }
+
+    if (target.role === "superadmin") {
+      const others = await countSuperadmins(target.id);
+      if (others === 0) {
+        return reply.status(400).send({
+          success: false,
+          error: "Cannot delete the last superadmin account",
+        });
+      }
+    }
+
+    const siteCount = await prisma.site.count({ where: { ownerId: id } });
+    if (siteCount > 0) {
+      const transferTo = query.transferSitesTo?.trim();
+      if (!transferTo) {
+        return reply.status(409).send({
+          success: false,
+          error: `User owns ${siteCount} site(s). Pass transferSitesTo=<userId> to reassign ownership, or delete their sites first.`,
+          code: "USER_OWNS_SITES",
+          siteCount,
+        });
+      }
+      const newOwner = await prisma.user.findUnique({ where: { id: transferTo } });
+      if (!newOwner) {
+        return reply.status(400).send({ success: false, error: "transferSitesTo user not found" });
+      }
+      if (newOwner.id === id) {
+        return reply.status(400).send({ success: false, error: "transferSitesTo must be a different user" });
+      }
+      await prisma.site.updateMany({
+        where: { ownerId: id },
+        data: { ownerId: transferTo },
+      });
     }
 
     await prisma.user.delete({ where: { id } });
-    return reply.send({ success: true, message: "User deleted" });
+    return reply.send({
+      success: true,
+      message: siteCount > 0 ? `User deleted; ${siteCount} site(s) transferred` : "User deleted",
+    });
   });
 
   // ─── SQL editor step-up (superadmin): short-lived JWT for X-SQL-Editor-Elevation ─────────────────
