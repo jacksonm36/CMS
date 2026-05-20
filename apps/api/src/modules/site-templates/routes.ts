@@ -56,11 +56,22 @@ function refineTemplateDeployFlags<
         path: ["provisionDockerDb"],
       });
     }
-    const d = data.dbStackVersion ?? "";
-    if (!d.startsWith("mysql") && !d.startsWith("mariadb")) {
+    const d = (data.dbStackVersion ?? "").toLowerCase();
+    const ok =
+      d.startsWith("mysql") ||
+      d.startsWith("mariadb") ||
+      d.startsWith("postgresql") ||
+      d.startsWith("postgres") ||
+      d.startsWith("sqlite") ||
+      d.startsWith("mongodb") ||
+      d.startsWith("mongo") ||
+      d.startsWith("mssql") ||
+      d.startsWith("sqlserver");
+    if (!ok) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "provisionDockerDb requires dbStackVersion mysql-* or mariadb-*.",
+        message:
+          "provisionDockerDb requires dbStackVersion mysql-*, mariadb-*, postgresql-*, sqlite-*, mongodb-*, or mssql-*.",
         path: ["dbStackVersion"],
       });
     }
@@ -78,10 +89,17 @@ const deployDomainSchema = z
     message: "Invalid domain characters",
   });
 
+const deployConflictActionZ = z.enum([
+  "delete_and_redeploy",
+  "reset_db_and_redeploy",
+  "new_db_and_redeploy",
+]);
+
 const deployBody = z.object({
   name: z.string().min(1).max(100),
   domain: deployDomainSchema,
   ownerId: z.string().cuid().optional(),
+  conflictAction: deployConflictActionZ.optional(),
 });
 
 export async function siteTemplatesRoutes(app: FastifyInstance): Promise<void> {
@@ -127,7 +145,11 @@ export async function siteTemplatesRoutes(app: FastifyInstance): Promise<void> {
     });
 
     if (!result.ok) {
-      return reply.status(result.status).send({ success: false, error: result.error });
+      return reply.status(result.status).send({
+        success: false,
+        error: result.error,
+        ...(result.conflict ? { conflict: result.conflict } : {}),
+      });
     }
     return reply.status(201).send({
       success: true,
@@ -156,6 +178,7 @@ export async function siteTemplatesRoutes(app: FastifyInstance): Promise<void> {
         domain: parsed.data.domain,
         ownerId: parsed.data.ownerId,
         actorUserId: request.user.sub as string,
+        conflictAction: parsed.data.conflictAction,
       },
       stream,
     );

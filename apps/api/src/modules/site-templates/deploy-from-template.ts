@@ -6,6 +6,13 @@ import { PORT_ALLOC_END, PORT_ALLOC_START } from "../sites/site-docker-isolation
 import { writeSiteConfig, reloadWebServer, type WebServerType } from "../sites/webservers/index.js";
 import { deployInfrastructureForTemplatedSite } from "../sites/site-template-stack-deploy.js";
 import { assertSafeSiteDomain, siteRootPathFromDomain } from "../sites/safe-site-domain.js";
+import {
+  buildDeployConflictInfo,
+  deleteSiteForRedeploy,
+  type DeployConflictAction,
+  type DeployConflictInfo,
+} from "./deploy-conflict.js";
+import { resetSiteDatabase } from "../sites/site-db-reset.js";
 
 function typeNeedsPort(type: string): boolean {
   return type === "nodejs" || type === "python";
@@ -18,11 +25,12 @@ export type DeployFromTemplateInput = {
   ownerId?: string;
   actorUserId: string;
   actorRole: string;
+  conflictAction?: DeployConflictAction;
 };
 
 export type DeployFromTemplateResult =
   | { ok: true; site: Site; warnings: string[] }
-  | { ok: false; status: number; error: string };
+  | { ok: false; status: number; error: string; conflict?: DeployConflictInfo };
 
 export async function deploySiteFromTemplate(input: DeployFromTemplateInput): Promise<DeployFromTemplateResult> {
   let domain: string;
@@ -44,7 +52,36 @@ export async function deploySiteFromTemplate(input: DeployFromTemplateInput): Pr
   }
 
   const existing = await prisma.site.findUnique({ where: { domain } });
-  if (existing) return { ok: false, status: 409, error: "Domain already exists" };
+  if (existing) {
+    const conflict = await buildDeployConflictInfo(existing, tpl);
+    if (!input.conflictAction) {
+      return {
+        ok: false,
+        status: 409,
+        error: `Site already exists for ${domain}. Choose delete, reset database, new database, or use a different domain.`,
+        conflict,
+      };
+    }
+    if (input.conflictAction === "delete_and_redeploy") {
+      await deleteSiteForRedeploy(existing);
+    } else if (input.conflictAction === "reset_db_and_redeploy") {
+      const wipe = await resetSiteDatabase(existing, "wipe");
+      if (!wipe.ok) return { ok: false, status: 502, error: wipe.error };
+      return {
+        ok: false,
+        status: 501,
+        error: "Redeploy on existing site requires the streaming deploy API (/deploy-stream).",
+      };
+    } else if (input.conflictAction === "new_db_and_redeploy") {
+      const recreated = await resetSiteDatabase(existing, "recreate");
+      if (!recreated.ok) return { ok: false, status: 502, error: recreated.error };
+      return {
+        ok: false,
+        status: 501,
+        error: "Redeploy on existing site requires the streaming deploy API (/deploy-stream).",
+      };
+    }
+  }
 
   let ownerId = input.actorUserId;
   if (input.ownerId) {

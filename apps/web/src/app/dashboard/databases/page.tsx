@@ -31,6 +31,9 @@ export default function DatabasesPage() {
     queryFn: () => apiClient.get<{ data: DbConnection[] }>("/databases/connections"),
   });
   const connections = connsData?.data ?? [];
+  const activeConn = connections.find((c) => c.id === selectedConn);
+  const connEngine = activeConn?.engine ?? "postgresql";
+  const isSiteSidecar = Boolean(activeConn?.managed ?? selectedConn.startsWith("site_"));
 
   const tabs: { id: Tab; label: string; icon: React.ElementType }[] = useMemo(
     () =>
@@ -79,18 +82,34 @@ export default function DatabasesPage() {
         ))}
       </div>
 
-      {activeTab === "overview" && <OverviewTab connectionId={selectedConn} />}
-      {activeTab === "browser" && <BrowserTab connectionId={selectedConn} />}
+      {activeConn && (
+        <p className="text-xs text-muted-foreground -mt-3">
+          {activeConn.host}:{activeConn.port} · database <span className="font-mono text-foreground">{activeConn.database}</span>
+          {isSiteSidecar ? " · managed site sidecar (browse only)" : ""}
+        </p>
+      )}
+
+      {activeTab === "overview" && <OverviewTab connectionId={selectedConn} engine={connEngine} managed={isSiteSidecar} />}
+      {activeTab === "browser" && <BrowserTab connectionId={selectedConn} engine={connEngine} />}
       {activeTab === "query" && <QueryTab connectionId={selectedConn} />}
-      {activeTab === "users" && <UsersTab connectionId={selectedConn} />}
+      {activeTab === "users" && <UsersTab connectionId={selectedConn} engine={connEngine} managed={isSiteSidecar} />}
     </div>
   );
 }
 
 // ─── Overview ─────────────────────────────────────────────────────────────────
 
-function OverviewTab({ connectionId }: { connectionId: string }) {
+function OverviewTab({
+  connectionId,
+  engine,
+  managed,
+}: {
+  connectionId: string;
+  engine: DbConnection["engine"];
+  managed: boolean;
+}) {
   const queryClient = useQueryClient();
+  const sqlEngine = engine === "postgresql" ? "postgresql" : "mysql";
 
   const { data: statsData, isLoading, error } = useQuery({
     queryKey: ["db-stats", connectionId],
@@ -100,18 +119,18 @@ function OverviewTab({ connectionId }: { connectionId: string }) {
 
   const { data: dbsData } = useQuery({
     queryKey: ["db-list", connectionId],
-    queryFn: () => apiClient.get<{ data: DbDatabase[] }>(`/databases/list?connectionId=${connectionId}`),
+    queryFn: () => apiClient.get<{ data: DbDatabase[] }>(`/databases/list?connectionId=${connectionId}&engine=${sqlEngine}`),
     retry: 1,
   });
 
   const [showCreate, setShowCreate] = useState(false);
   const [newDbName, setNewDbName] = useState("");
   const createMutation = useMutation({
-    mutationFn: (name: string) => apiClient.post("/databases/create", { name, engine: "postgresql", connectionId }),
+    mutationFn: (name: string) => apiClient.post("/databases/create", { name, engine: sqlEngine, connectionId }),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["db-list"] }); setShowCreate(false); setNewDbName(""); },
   });
   const dropMutation = useMutation({
-    mutationFn: (name: string) => apiClient.delete(`/databases/${name}?engine=postgresql&connectionId=${connectionId}`),
+    mutationFn: (name: string) => apiClient.delete(`/databases/${name}?engine=${sqlEngine}&connectionId=${connectionId}`),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["db-list"] }),
   });
 
@@ -157,9 +176,11 @@ function OverviewTab({ connectionId }: { connectionId: string }) {
       <div className="rounded-xl border bg-card overflow-hidden">
         <div className="flex items-center justify-between p-5 border-b border-border">
           <h3 className="font-semibold">Databases</h3>
-          <button onClick={() => setShowCreate(true)} className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors">
-            <Plus className="w-3.5 h-3.5" /> New Database
-          </button>
+          {!managed && (
+            <button onClick={() => setShowCreate(true)} className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors">
+              <Plus className="w-3.5 h-3.5" /> New Database
+            </button>
+          )}
         </div>
 
         {showCreate && (
@@ -194,9 +215,11 @@ function OverviewTab({ connectionId }: { connectionId: string }) {
                     </span>
                   </td>
                   <td className="px-5 py-3 opacity-0 group-hover:opacity-100">
-                    <button onClick={() => { if (confirm(`Drop database "${db.name}"? This is irreversible!`)) dropMutation.mutate(db.name); }} className="text-xs text-destructive hover:underline flex items-center gap-1">
-                      <Trash2 className="w-3 h-3" /> Drop
-                    </button>
+                    {!managed && (
+                      <button onClick={() => { if (confirm(`Drop database "${db.name}"? This is irreversible!`)) dropMutation.mutate(db.name); }} className="text-xs text-destructive hover:underline flex items-center gap-1">
+                        <Trash2 className="w-3 h-3" /> Drop
+                      </button>
+                    )}
                   </td>
                 </tr>
               );
@@ -213,7 +236,8 @@ function OverviewTab({ connectionId }: { connectionId: string }) {
 
 // ─── Table Browser ────────────────────────────────────────────────────────────
 
-function BrowserTab({ connectionId }: { connectionId: string }) {
+function BrowserTab({ connectionId, engine }: { connectionId: string; engine: DbConnection["engine"] }) {
+  const sqlEngine = engine === "postgresql" ? "postgresql" : "mysql";
   const [selectedDb, setSelectedDb] = useState("");
   const [selectedTable, setSelectedTable] = useState("");
   const [expandedSchema, setExpandedSchema] = useState(new Set(["public"]));
@@ -222,18 +246,18 @@ function BrowserTab({ connectionId }: { connectionId: string }) {
 
   const { data: dbsData } = useQuery({
     queryKey: ["db-list", connectionId],
-    queryFn: () => apiClient.get<{ data: DbDatabase[] }>(`/databases/list?connectionId=${connectionId}`),
+    queryFn: () => apiClient.get<{ data: DbDatabase[] }>(`/databases/list?connectionId=${connectionId}&engine=${sqlEngine}`),
   });
 
   const { data: tablesData } = useQuery({
     queryKey: ["db-tables", connectionId, selectedDb],
-    queryFn: () => apiClient.get<{ data: DbTable[] }>(`/databases/${selectedDb}/tables?connectionId=${connectionId}`),
+    queryFn: () => apiClient.get<{ data: DbTable[] }>(`/databases/${selectedDb}/tables?connectionId=${connectionId}&engine=${sqlEngine}`),
     enabled: !!selectedDb,
   });
 
   const { data: rowsData, isLoading: loadingRows } = useQuery({
     queryKey: ["db-rows", connectionId, selectedDb, selectedTable, page],
-    queryFn: () => apiClient.get<{ data: DbTableRows }>(`/databases/${selectedDb}/tables/${encodeURIComponent(selectedTable)}/rows?connectionId=${connectionId}&limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}`),
+    queryFn: () => apiClient.get<{ data: DbTableRows }>(`/databases/${selectedDb}/tables/${encodeURIComponent(selectedTable)}/rows?connectionId=${connectionId}&engine=${sqlEngine}&limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}`),
     enabled: !!selectedDb && !!selectedTable,
   });
 
@@ -665,15 +689,25 @@ function QueryTab({ connectionId }: { connectionId: string }) {
 
 // ─── Users ────────────────────────────────────────────────────────────────────
 
-function UsersTab({ connectionId }: { connectionId: string }) {
+function UsersTab({
+  connectionId,
+  engine,
+  managed,
+}: {
+  connectionId: string;
+  engine: DbConnection["engine"];
+  managed: boolean;
+}) {
   const queryClient = useQueryClient();
   const [showCreate, setShowCreate] = useState(false);
   const [form, setForm] = useState({ username: "", password: "", database: "", privileges: "ALL" });
+  const pgOnly = engine !== "postgresql" || managed;
 
   const { data, error } = useQuery({
     queryKey: ["db-users", connectionId],
     queryFn: () => apiClient.get<{ data: DbUser[] }>(`/databases/users?connectionId=${connectionId}`),
     retry: 1,
+    enabled: !pgOnly,
   });
 
   const createMutation = useMutation({
@@ -687,6 +721,15 @@ function UsersTab({ connectionId }: { connectionId: string }) {
   });
 
   const users = data?.data ?? [];
+
+  if (pgOnly) {
+    return (
+      <div className="rounded-xl border bg-card p-6 text-sm text-muted-foreground">
+        User management in this UI is available for the HostPanel PostgreSQL connection only.
+        {managed ? " Site sidecar credentials are managed via Sites → Reset database." : " For MySQL/MariaDB sidecars, use the Table Browser or Query Editor."}
+      </div>
+    );
+  }
 
   return (
     <div className="rounded-xl border bg-card overflow-hidden">

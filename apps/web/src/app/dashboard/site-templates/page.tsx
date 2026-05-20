@@ -7,7 +7,16 @@ import { Loader2, Plus, Trash2, LayoutTemplate, Pencil, X, Network, Database, Ro
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { TemplateDeployDialog } from "@/components/site-templates/template-deploy-dialog";
-import { postSiteTemplateDeployStream, type DeployStreamEvent } from "@/lib/template-deploy-stream";
+import {
+  DeployConflictDialog,
+  type DeployConflictChoice,
+} from "@/components/site-templates/deploy-conflict-dialog";
+import {
+  postSiteTemplateDeployStream,
+  type DeployConflictAction,
+  type DeployConflictInfo,
+  type DeployStreamEvent,
+} from "@/lib/template-deploy-stream";
 
 type SiteTemplateRow = {
   id: string;
@@ -445,9 +454,16 @@ export default function SiteTemplatesPage() {
     error?: string;
   } | null>(null);
   const deployAbortRef = useRef<AbortController | null>(null);
+  const [deployConflict, setDeployConflict] = useState<DeployConflictInfo | null>(null);
+  const [pendingDeploy, setPendingDeploy] = useState<{ name: string; domain: string } | null>(null);
 
   const runDeployStream = useCallback(
-    async (templateId: string, name: string, domain: string) => {
+    async (
+      templateId: string,
+      name: string,
+      domain: string,
+      conflictAction?: DeployConflictAction,
+    ) => {
       deployAbortRef.current?.abort();
       deployAbortRef.current = new AbortController();
       const { signal } = deployAbortRef.current;
@@ -460,7 +476,7 @@ export default function SiteTemplatesPage() {
       try {
         await postSiteTemplateDeployStream(
           templateId,
-          { name, domain },
+          { name, domain, conflictAction },
           (ev: DeployStreamEvent) => {
             setDeployPanel((prev) => {
               if (!prev) return prev;
@@ -484,6 +500,18 @@ export default function SiteTemplatesPage() {
                 case "step_complete":
                   push(`    │ finished (exit ${ev.code})`);
                   return { ...prev, lines };
+                case "deploy_conflict":
+                  setDeployConflict(ev.conflict);
+                  setPendingDeploy({ name, domain });
+                  push("━━ Domain already in use — choose an action in the dialog ━━");
+                  return {
+                    ...prev,
+                    lines,
+                    phase: "Conflict",
+                    running: false,
+                    ok: false,
+                    error: "Site already exists for this domain.",
+                  };
                 case "done":
                   push(ev.ok ? "━━ Deploy completed ━━" : `━━ Failed: ${ev.error ?? "unknown"} ━━`);
                   if (ev.ok) {
@@ -681,17 +709,54 @@ export default function SiteTemplatesPage() {
 
       <TemplateDeployDialog
         template={deployTarget}
-        open={deployTarget != null}
+        open={deployTarget != null && deployConflict == null}
         onClose={() => {
           if (deployPanel?.running) deployAbortRef.current?.abort();
           setDeployTarget(null);
           setDeployPanel(null);
+          setDeployConflict(null);
+          setPendingDeploy(null);
         }}
         deployPanel={deployPanel}
         canSubmit={!deployPanel?.running}
         onDeploy={({ name, domain }) => {
           if (!deployTarget) return;
+          setDeployConflict(null);
+          setPendingDeploy(null);
           void runDeployStream(deployTarget.id, name, domain);
+        }}
+      />
+
+      <DeployConflictDialog
+        open={deployConflict != null && deployTarget != null}
+        conflict={deployConflict}
+        templateName={deployTarget?.name ?? ""}
+        pendingName={pendingDeploy?.name ?? ""}
+        pendingDomain={pendingDeploy?.domain ?? deployConflict?.domain ?? ""}
+        onClose={() => {
+          setDeployConflict(null);
+          setPendingDeploy(null);
+        }}
+        onChoose={(choice: DeployConflictChoice) => {
+          if (!deployTarget || !pendingDeploy) return;
+          if (choice === "cancel") {
+            setDeployConflict(null);
+            setPendingDeploy(null);
+            return;
+          }
+          if (choice === "new_site") {
+            setDeployConflict(null);
+            setPendingDeploy(null);
+            setDeployPanel(null);
+            return;
+          }
+          setDeployConflict(null);
+          void runDeployStream(
+            deployTarget.id,
+            pendingDeploy.name,
+            pendingDeploy.domain,
+            choice,
+          );
         }}
       />
     </div>

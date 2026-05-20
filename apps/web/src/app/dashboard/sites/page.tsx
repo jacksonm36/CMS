@@ -3,7 +3,8 @@
 import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
-import { Plus, Globe, Trash2, ExternalLink, Loader2, MoreVertical, Pause, Play, RefreshCw, Cpu, Box, Network, Database, Home } from "lucide-react";
+import { Plus, Globe, Trash2, ExternalLink, Loader2, MoreVertical, Pause, Play, RefreshCw, Cpu, Box, Network, Database, Home, RotateCcw } from "lucide-react";
+import { toast } from "sonner";
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { formatRelative, getStatusColor } from "@/lib/utils";
@@ -40,6 +41,31 @@ const SITE_TYPES: { value: Site["type"]; label: string }[] = [
   { value: "nodejs", label: "Node.js app" },
   { value: "python", label: "Python app" },
 ];
+
+type SiteListItem = Site & { _count?: { databases: number; cronJobs: number } };
+
+function siteHasResettableDb(site: SiteListItem): boolean {
+  const db = (site.dbStackVersion ?? "").toLowerCase();
+  if (
+    db.startsWith("mysql") ||
+    db.startsWith("mariadb") ||
+    db.startsWith("postgresql") ||
+    db.startsWith("postgres") ||
+    db.startsWith("sqlite") ||
+    db.startsWith("mongodb") ||
+    db.startsWith("mongo") ||
+    db.startsWith("mssql") ||
+    db.startsWith("sqlserver")
+  ) {
+    return true;
+  }
+  return (site._count?.databases ?? 0) > 0;
+}
+
+function siteSupportsNewDatabase(site: SiteListItem): boolean {
+  const db = (site.dbStackVersion ?? "").toLowerCase();
+  return siteHasResettableDb(site) && db.length > 0;
+}
 
 function SiteTypeHint({ type }: { type: Site["type"] }) {
   const copy: Record<Site["type"], string> = {
@@ -520,6 +546,7 @@ export default function SitesPage() {
               site={site}
               catalog={catalog}
               canManageIsolation={staff || Boolean(user?.dockerAccess)}
+              canResetDb={staff && siteHasResettableDb(site)}
               onDelete={() => deleteMutation.mutate(site.id)}
               onToggle={() => toggleStatusMutation.mutate({ id: site.id, status: site.status === "active" ? "suspended" : "active" })}
               onSwitchWebServer={(ws) => switchWsMutation.mutate({ id: site.id, webServer: ws })}
@@ -535,13 +562,15 @@ function SiteCard({
   site,
   catalog,
   canManageIsolation,
+  canResetDb,
   onDelete,
   onToggle,
   onSwitchWebServer,
 }: {
-  site: Site;
+  site: SiteListItem;
   catalog: StackCatalog | undefined;
   canManageIsolation: boolean;
+  canResetDb: boolean;
   onDelete: () => void;
   onToggle: () => void;
   onSwitchWebServer: (ws: WebServerType) => void;
@@ -599,6 +628,21 @@ function SiteCard({
       setMenuOpen(false);
     },
   });
+
+  const resetDbMutation = useMutation({
+    mutationFn: (mode: "wipe" | "recreate") =>
+      apiClient.post<{ message: string }>(`/sites/${site.id}/reset-db`, { mode, reprovisionCms: true }),
+    onSuccess: (res: { message?: string }) => {
+      queryClient.invalidateQueries({ queryKey: ["sites"] });
+      setMenuOpen(false);
+      toast.success("Database reset", { description: res.message ?? "Done" });
+    },
+    onError: (err: Error) => {
+      toast.error("Reset failed", { description: err.message });
+    },
+  });
+
+  const dbEngine = (site.dbStackVersion ?? "").split("-")[0]?.toLowerCase() ?? "database";
 
   /** TanStack Query keeps mutation errors forever — clears stale banners on dismiss / closing menu */
   function clearIsolationMutationErrors(): void {
@@ -704,6 +748,50 @@ function SiteCard({
                     </div>
                   )}
                 </div>
+                {canResetDb && (
+                  <>
+                    <div className="border-t my-1" />
+                    <button
+                      type="button"
+                      disabled={resetDbMutation.isPending}
+                      onClick={() => {
+                        if (
+                          !confirm(
+                            `Reset ${dbEngine} data for ${site.domain}?\n\nClears database content but keeps the same .hostpanel-db.env credentials. Use before re-running a CMS installer.`,
+                          )
+                        ) {
+                          return;
+                        }
+                        resetDbMutation.mutate("wipe");
+                      }}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left"
+                    >
+                      {resetDbMutation.isPending ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <RotateCcw className="w-3.5 h-3.5" />
+                      )}
+                      Reset database
+                    </button>
+                    {siteSupportsNewDatabase(site) && (
+                      <button
+                        type="button"
+                        disabled={resetDbMutation.isPending}
+                        onClick={() => {
+                          const msg =
+                            dbEngine === "sqlite"
+                              ? `Create a new SQLite file for ${site.domain}?`
+                              : `Create a new ${dbEngine} database for ${site.domain}?\n\nReplaces the stack database with fresh storage and new credentials.`;
+                          if (!confirm(msg)) return;
+                          resetDbMutation.mutate("recreate");
+                        }}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left"
+                      >
+                        <Database className="w-3.5 h-3.5" /> New database
+                      </button>
+                    )}
+                  </>
+                )}
                 <div className="border-t my-1" />
                 <button onClick={() => { if (confirm(`Delete ${site.name}?`)) { onDelete(); setMenuOpen(false); } }} className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-destructive/10 text-destructive text-left">
                   <Trash2 className="w-3.5 h-3.5" /> Delete

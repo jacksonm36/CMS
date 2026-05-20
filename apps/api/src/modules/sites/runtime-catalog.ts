@@ -9,6 +9,10 @@ export const DB_STACK_VERSIONS = [
   "postgresql-17",
   "mysql-8.0",
   "mariadb-10.11",
+  "mariadb-11",
+  "sqlite-3",
+  "mongodb-7",
+  "mssql-2022",
 ] as const;
 
 export const phpVersionEnum = z.enum(PHP_VERSIONS);

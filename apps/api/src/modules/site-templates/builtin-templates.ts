@@ -30,6 +30,42 @@ function phpMariadbStack(
   };
 }
 
+function phpPostgresStack(
+  row: Pick<Prisma.SiteTemplateCreateInput, "name" | "slug" | "description" | "defaultDocument">,
+): Prisma.SiteTemplateCreateInput {
+  return {
+    type: "php",
+    webServer: "nginx",
+    phpVersion: "8.2",
+    dbStackVersion: "postgresql-16",
+    defaultDocument: row.defaultDocument ?? "public/index.php",
+    autoDeployIsolation: true,
+    stackNetworkPerSite: true,
+    provisionDockerDb: true,
+    name: row.name,
+    slug: row.slug,
+    description: row.description,
+  };
+}
+
+function phpSqliteStack(
+  row: Pick<Prisma.SiteTemplateCreateInput, "name" | "slug" | "description" | "defaultDocument">,
+): Prisma.SiteTemplateCreateInput {
+  return {
+    type: "php",
+    webServer: "nginx",
+    phpVersion: "8.2",
+    dbStackVersion: "sqlite-3",
+    defaultDocument: row.defaultDocument ?? "public/index.php",
+    autoDeployIsolation: true,
+    stackNetworkPerSite: false,
+    provisionDockerDb: true,
+    name: row.name,
+    slug: row.slug,
+    description: row.description,
+  };
+}
+
 const BUILTIN: Prisma.SiteTemplateCreateInput[] = [
   {
     name: "Static site",
@@ -121,6 +157,18 @@ const BUILTIN: Prisma.SiteTemplateCreateInput[] = [
     name: "Laravel + MariaDB",
     slug: "laravel-mariadb",
     description: "Laravel skeleton with MariaDB 11.",
+    defaultDocument: "public/index.php",
+  }),
+  phpPostgresStack({
+    name: "Laravel + PostgreSQL",
+    slug: "laravel-postgresql",
+    description: "Laravel skeleton with PostgreSQL 16 in Docker (.env auto-provisioned).",
+    defaultDocument: "public/index.php",
+  }),
+  phpSqliteStack({
+    name: "Laravel + SQLite",
+    slug: "laravel-sqlite",
+    description: "Laravel skeleton with file-based SQLite under private/ (no Docker DB container).",
     defaultDocument: "public/index.php",
   }),
 

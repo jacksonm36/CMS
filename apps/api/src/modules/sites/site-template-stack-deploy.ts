@@ -8,9 +8,11 @@ import {
   provisionSidecarPackages,
   sidecarContainerName,
 } from "./site-docker-isolation.js";
-import { ensureMysqlStackForSite, removeStackMysqlContainer } from "./site-stack-mysql.js";
+import { ensureStackDbForSite, removeStackDbContainer } from "./site-stack-db.js";
+import { prismaDbEngine } from "./site-db-engine.js";
 import { getEffectiveDeployFlags } from "../site-templates/template-deploy-flags.js";
 import { writeSiteDbEnvFile } from "./write-site-db-env.js";
+import { engineFromDbStackVersion } from "./site-db-engine.js";
 
 function sidecarStackFromSite(site: Site) {
   return {
@@ -60,42 +62,59 @@ export async function deployInfrastructureForTemplatedSite(
     warnings.push("Docker DB works best with autoDeployIsolation (Alpine sidecar) enabled.");
   }
 
-  if (flags.provisionDockerDb && working.networkGroup) {
-    const db = await ensureMysqlStackForSite({
+  const stackEngine = engineFromDbStackVersion(working.dbStackVersion);
+  const needsNetwork = stackEngine && stackEngine !== "sqlite";
+  if (flags.provisionDockerDb && needsNetwork && !working.networkGroup) {
+    const ng = `site-${working.id}`;
+    working = await prisma.site.update({ where: { id: working.id }, data: { networkGroup: ng } });
+  }
+
+  if (flags.provisionDockerDb && stackEngine) {
+    const db = await ensureStackDbForSite({
       siteId: working.id,
-      networkGroupShort: working.networkGroup,
+      siteRootPath: working.rootPath,
+      networkGroupShort: working.networkGroup ?? `site-${working.id}`,
       dbStackVersion: working.dbStackVersion,
     });
     if (!db.ok) {
-      warnings.push(`Stack MySQL: ${db.error}`);
+      warnings.push(`Stack database (${stackEngine}): ${db.error}`);
     } else {
-      working = await prisma.site.update({
-        where: { id: working.id },
-        data: { stackDbContainerId: db.containerId, stackDbHostPort: db.hostPort },
-      });
+      if (db.containerId) {
+        working = await prisma.site.update({
+          where: { id: working.id },
+          data: { stackDbContainerId: db.containerId, stackDbHostPort: db.hostPort },
+        });
+      }
       try {
-        await prisma.siteDatabase.create({
-          data: {
-            siteId: working.id,
-            name: db.dbName,
-            engine: "mysql",
+        if (db.engine !== "sqlite") {
+          await prisma.siteDatabase.create({
+            data: {
+              siteId: working.id,
+              name: db.dbName,
+              engine: prismaDbEngine(db.engine),
+              host: "127.0.0.1",
+              port: db.hostPort,
+              username: db.dbUser,
+              passwordHash: await bcrypt.hash(db.dbPassword, 10),
+            },
+          });
+        }
+        await writeSiteDbEnvFile(
+          working.rootPath,
+          {
+            engine: db.engine,
             host: "127.0.0.1",
             port: db.hostPort,
+            database: db.dbName,
             username: db.dbUser,
-            passwordHash: await bcrypt.hash(db.dbPassword, 10),
+            password: db.dbPassword,
+            dbPath: db.dbPath,
           },
-        });
-        await writeSiteDbEnvFile(working.rootPath, {
-          engine: "mysql",
-          host: "127.0.0.1",
-          port: db.hostPort,
-          database: db.dbName,
-          username: db.dbUser,
-          password: db.dbPassword,
-        });
+          { siteId: working.id },
+        );
       } catch (e) {
         warnings.push(
-          `Stack MySQL started but SiteDatabase/env file failed: ${e instanceof Error ? e.message : String(e)}`,
+          `Stack database started but SiteDatabase/env file failed: ${e instanceof Error ? e.message : String(e)}`,
         );
       }
     }
@@ -122,5 +141,5 @@ export async function deployInfrastructureForTemplatedSite(
 }
 
 export function teardownStackContainers(siteId: string): void {
-  removeStackMysqlContainer(siteId);
+  removeStackDbContainer(siteId);
 }

@@ -41,7 +41,15 @@ import { assertSafeCronCommand, CRON_COMMAND_MAX_LEN } from "../../lib/security-
 import { allocateHostPanelLoopbackPort } from "./port-allocate.js";
 import { deployInfrastructureForTemplatedSite, teardownStackContainers } from "./site-template-stack-deploy.js"
 import { assertSafeSiteDomain, siteRootPathFromDomain } from "./safe-site-domain.js";
-import { deploySiteFromTemplate } from "../site-templates/deploy-from-template.js";;
+import { deploySiteFromTemplate } from "../site-templates/deploy-from-template.js";
+import {
+  resetSiteDatabase,
+  reprovisionCmsAfterDbReset,
+  siteHasProvisionedDbEnv,
+  siteCanResetDatabase,
+  siteSupportsRecreateStack,
+  type SiteDbResetMode,
+} from "./site-db-reset.js";
 
 /** True for site types that need an app port for the reverse proxy. */
 function typeNeedsPort(type: string): boolean {
@@ -384,6 +392,48 @@ export async function sitesRoutes(app: FastifyInstance) {
       data: { site: updated },
       message: "Tenant isolation cleared — the sidecar is gone and the panel record is updated.",
     });
+  });
+
+  // POST /api/sites/:id/reset-db — wipe tables or recreate Docker MySQL (staff)
+  app.post("/:id/reset-db", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = z
+      .object({
+        mode: z.enum(["wipe", "recreate"]).default("wipe"),
+        reprovisionCms: z.boolean().optional().default(true),
+      })
+      .safeParse(request.body ?? {});
+    if (!body.success) return reply.status(400).send({ success: false, error: body.error.message });
+
+    const site = await prisma.site.findUnique({
+      where: { id },
+      include: { template: { select: { slug: true } } },
+    });
+    if (!site) return reply.status(404).send({ success: false, error: "Site not found" });
+
+    if (!siteCanResetDatabase(site) && !(await siteHasProvisionedDbEnv(site.rootPath))) {
+      return reply.status(400).send({
+        success: false,
+        error: "This site has no HostPanel-provisioned database (.hostpanel-db.env).",
+      });
+    }
+
+    const mode = body.data.mode as SiteDbResetMode;
+    if (mode === "recreate" && !siteSupportsRecreateStack(site)) {
+      return reply.status(400).send({
+        success: false,
+        error: "Recreate requires a stack dbStackVersion (mysql, mariadb, postgresql, mongodb, mssql, or sqlite).",
+      });
+    }
+
+    const result = await resetSiteDatabase(site, mode);
+    if (!result.ok) return reply.status(502).send({ success: false, error: result.error });
+
+    if (body.data.reprovisionCms && site.template?.slug) {
+      await reprovisionCmsAfterDbReset(site, site.template.slug);
+    }
+
+    return reply.send({ success: true, message: result.message });
   });
 
   // GET /api/sites/:id

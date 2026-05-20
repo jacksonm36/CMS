@@ -260,12 +260,16 @@ export interface WebServerInfo {
 export interface DbConnection {
   id: string;
   name: string;
-  engine: "postgresql" | "mysql";
+  engine: "postgresql" | "mysql" | "mariadb";
   host: string;
   port: number;
   database: string;
   username: string;
   isDefault: boolean;
+  /** Per-site Docker sidecar (from SiteDatabase + .hostpanel-db.env). */
+  siteId?: string;
+  siteDomain?: string;
+  managed?: boolean;
 }
 
 export interface DbDatabase {

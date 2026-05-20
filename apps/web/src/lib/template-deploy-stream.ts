@@ -1,9 +1,36 @@
+export type DeployConflictInfo = {
+  existingSiteId: string;
+  existingSiteName: string;
+  domain: string;
+  existingTemplateId: string | null;
+  deployingTemplateId: string;
+  sameTemplate: boolean;
+  hasDockerMysql: boolean;
+  hasStackDb: boolean;
+  stackDbEngine: string | null;
+  hasDbEnvFile: boolean;
+};
+
+export type DeployConflictAction =
+  | "delete_and_redeploy"
+  | "reset_db_and_redeploy"
+  | "new_db_and_redeploy";
+
 export type DeployStreamEvent =
   | { type: "start"; templateId: string; domain: string }
   | { type: "phase"; phase: string; title: string; index: number; total: number }
   | { type: "log"; line: string; source: "stdout" | "stderr" }
   | { type: "step_complete"; phase: string; code: number }
-  | { type: "done"; ok: boolean; error?: string; siteId?: string; site?: unknown; warnings?: string[] };
+  | { type: "deploy_conflict"; conflict: DeployConflictInfo }
+  | {
+      type: "done";
+      ok: boolean;
+      error?: string;
+      conflict?: boolean;
+      siteId?: string;
+      site?: unknown;
+      warnings?: string[];
+    };
 
 function browserApiBase(): string {
   if (typeof window !== "undefined") return "";
@@ -33,7 +60,7 @@ async function consumeNdjson(res: Response, onEvent: (ev: DeployStreamEvent) => 
 
 export async function postSiteTemplateDeployStream(
   templateId: string,
-  body: { name: string; domain: string; ownerId?: string },
+  body: { name: string; domain: string; ownerId?: string; conflictAction?: DeployConflictAction },
   onEvent: (ev: DeployStreamEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {

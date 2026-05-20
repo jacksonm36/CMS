@@ -4,9 +4,12 @@ import { requireRole, requireSuperadminSqlEditorStepUp } from "../../lib/auth.js
 import { isSqlEditorReadOnly } from "../../lib/security-env.js";
 import {
   getDbConnections,
+  connectionEngine,
+  isManagedSiteConnection,
   queryPostgres,
   queryMysql,
   listDatabasesPostgres,
+  listDatabasesMysql,
   listTablesPg,
   listTablesMysql,
   getTableRowsPg,
@@ -14,6 +17,7 @@ import {
   createDatabase,
   dropDatabase,
   getDbStatsPg,
+  getDbStatsMysql,
 } from "./db-client.js";
 
 const querySchema = z.object({
@@ -70,7 +74,7 @@ function blockedSqlEditorReason(sql: string): string | null {
 
 const createDbSchema = z.object({
   name: z.string().regex(SAFE_DB_IDENTIFIER, "Invalid database name"),
-  engine: z.enum(["postgresql", "mysql"]),
+  engine: z.enum(["postgresql", "mysql", "mariadb"]),
   connectionId: z.string().optional(),
 });
 
@@ -94,12 +98,13 @@ export async function databaseRoutes(app: FastifyInstance) {
 
   app.get("/list", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
     const query = request.query as { connectionId?: string; engine?: string };
-    const engine = query.engine ?? "postgresql";
 
     try {
-      const dbs = engine === "postgresql"
-        ? await listDatabasesPostgres(query.connectionId)
-        : await listMysqlDatabases(query.connectionId);
+      const engine = query.engine ?? (await connectionEngine(query.connectionId));
+      const dbs =
+        engine === "postgresql"
+          ? await listDatabasesPostgres(query.connectionId)
+          : await listDatabasesMysql(query.connectionId);
       return reply.send({ success: true, data: dbs });
     } catch (err) {
       return reply.status(500).send({ success: false, error: (err as Error).message });
@@ -112,8 +117,15 @@ export async function databaseRoutes(app: FastifyInstance) {
     const body = createDbSchema.safeParse(request.body);
     if (!body.success) return reply.status(400).send({ success: false, error: body.error.message });
 
+    if (isManagedSiteConnection(body.data.connectionId)) {
+      return reply.status(400).send({
+        success: false,
+        error: "Cannot create databases on a managed site sidecar connection.",
+      });
+    }
+
     try {
-      await createDatabase(body.data.name, body.data.engine, body.data.connectionId);
+      await createDatabase(body.data.name, body.data.engine === "postgresql" ? "postgresql" : "mysql", body.data.connectionId);
       return reply.status(201).send({ success: true, message: `Database '${body.data.name}' created` });
     } catch (err) {
       return reply.status(500).send({ success: false, error: (err as Error).message });
@@ -129,8 +141,16 @@ export async function databaseRoutes(app: FastifyInstance) {
     }
     const query = request.query as { engine?: string; connectionId?: string };
 
+    if (isManagedSiteConnection(query.connectionId)) {
+      return reply.status(400).send({
+        success: false,
+        error: "Cannot drop databases on a managed site sidecar connection.",
+      });
+    }
+
     try {
-      await dropDatabase(name, query.engine ?? "postgresql", query.connectionId);
+      const engine = query.engine ?? (await connectionEngine(query.connectionId));
+      await dropDatabase(name, engine, query.connectionId);
       return reply.send({ success: true, message: `Database '${name}' dropped` });
     } catch (err) {
       return reply.status(500).send({ success: false, error: (err as Error).message });
@@ -147,9 +167,11 @@ export async function databaseRoutes(app: FastifyInstance) {
     const query = request.query as { engine?: string; connectionId?: string };
 
     try {
-      const tables = query.engine === "mysql"
-        ? await listTablesMysql(dbName, query.connectionId)
-        : await listTablesPg(dbName, query.connectionId);
+      const engine = query.engine ?? (await connectionEngine(query.connectionId));
+      const tables =
+        engine === "mysql"
+          ? await listTablesMysql(dbName, query.connectionId)
+          : await listTablesPg(dbName, query.connectionId);
       return reply.send({ success: true, data: tables });
     } catch (err) {
       return reply.status(500).send({ success: false, error: (err as Error).message });
@@ -168,9 +190,11 @@ export async function databaseRoutes(app: FastifyInstance) {
     const offset = Math.max(0, Math.floor(Number(query.offset ?? 0)) || 0);
 
     try {
-      const result = query.engine === "mysql"
-        ? await getTableRowsMysql(dbName, tableName, limit, offset, query.connectionId)
-        : await getTableRowsPg(dbName, tableName, limit, offset, query.connectionId);
+      const engine = query.engine ?? (await connectionEngine(query.connectionId));
+      const result =
+        engine === "mysql"
+          ? await getTableRowsMysql(dbName, tableName, limit, offset, query.connectionId)
+          : await getTableRowsPg(dbName, tableName, limit, offset, query.connectionId);
       return reply.send({ success: true, data: result });
     } catch (err) {
       return reply.status(500).send({ success: false, error: (err as Error).message });
@@ -204,9 +228,10 @@ export async function databaseRoutes(app: FastifyInstance) {
         return reply.status(404).send({ success: false, error: "Unknown connection id" });
       }
 
-      const result = target.engine === "mysql"
-        ? await queryMysql(sql, connectionId)
-        : await queryPostgres(sql, connectionId);
+      const result =
+        target.engine === "mysql" || target.engine === "mariadb"
+          ? await queryMysql(sql, connectionId)
+          : await queryPostgres(sql, connectionId);
 
       return reply.send({
         success: true,
@@ -228,7 +253,9 @@ export async function databaseRoutes(app: FastifyInstance) {
   app.get("/stats", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
     const query = request.query as { connectionId?: string };
     try {
-      const stats = await getDbStatsPg(query.connectionId);
+      const engine = await connectionEngine(query.connectionId);
+      const stats =
+        engine === "mysql" ? await getDbStatsMysql(query.connectionId) : await getDbStatsPg(query.connectionId);
       return reply.send({ success: true, data: stats });
     } catch (err) {
       return reply.status(500).send({ success: false, error: (err as Error).message });
@@ -242,6 +269,13 @@ export async function databaseRoutes(app: FastifyInstance) {
     if (!body.success) return reply.status(400).send({ success: false, error: body.error.message });
 
     const { connectionId, username, password, database, privileges } = body.data;
+
+    if (isManagedSiteConnection(connectionId) || (await connectionEngine(connectionId)) !== "postgresql") {
+      return reply.status(400).send({
+        success: false,
+        error: "User management is only supported on the HostPanel PostgreSQL connection.",
+      });
+    }
 
     try {
       const escapedPw = password.replace(/'/g, "''");
@@ -263,6 +297,9 @@ export async function databaseRoutes(app: FastifyInstance) {
   app.get("/users", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
     const query = request.query as { connectionId?: string };
     try {
+      if (isManagedSiteConnection(query.connectionId) || (await connectionEngine(query.connectionId)) !== "postgresql") {
+        return reply.send({ success: true, data: [] });
+      }
       const result = await queryPostgres(
         `SELECT usename as username, usecreatedb as can_create_db, usesuper as is_superuser,
                 valuntil as expires_at
@@ -290,9 +327,4 @@ export async function databaseRoutes(app: FastifyInstance) {
       return reply.status(500).send({ success: false, error: (err as Error).message });
     }
   });
-}
-
-async function listMysqlDatabases(_connectionId?: string): Promise<unknown[]> {
-  // MySQL support — returns empty if not configured
-  return [];
 }

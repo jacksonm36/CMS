@@ -14,14 +14,23 @@ import {
   sidecarContainerName,
   type SidecarStack,
 } from "../sites/site-docker-isolation.js";
-import { ensureMysqlStackForSite } from "../sites/site-stack-mysql.js";
+import { ensureStackDbForSite } from "../sites/site-stack-db.js";
+import { engineFromDbStackVersion, prismaDbEngine } from "../sites/site-db-engine.js";
 import { provisionSiteDir } from "../sites/provisioner.js";
 import { writeSiteConfig, reloadWebServer, type WebServerType } from "../sites/webservers/index.js";
 import { assertSafeSiteDomain, siteRootPathFromDomain } from "../sites/safe-site-domain.js";
 import { getEffectiveDeployFlags } from "./template-deploy-flags.js";
+import { shouldProvisionCmsAfterInstall, resolveCmsDbProfile } from "../sites/cms-db-profiles.js";
+import { provisionCmsInstall } from "../sites/cms-install-provision.js";
 import { writeSiteDbEnvFile } from "../sites/write-site-db-env.js";
 import { getAppInstallRecipe } from "./template-app-recipes.js";
 import bcrypt from "bcryptjs";
+import {
+  buildDeployConflictInfo,
+  deleteSiteForRedeploy,
+  type DeployConflictAction,
+} from "./deploy-conflict.js";
+import { resetSiteDatabase } from "../sites/site-db-reset.js";
 
 export type DeployStreamInput = {
   templateId: string;
@@ -29,6 +38,8 @@ export type DeployStreamInput = {
   domain: string;
   ownerId?: string;
   actorUserId: string;
+  /** Set after user picks an option in the deploy conflict dialog. */
+  conflictAction?: DeployConflictAction;
 };
 
 type WriteFn = (obj: Record<string, unknown>) => void;
@@ -144,8 +155,42 @@ export async function runDeploySiteStream(input: DeployStreamInput, stream: Pass
     }
     const existing = await prisma.site.findUnique({ where: { domain } });
     if (existing) {
-      write({ type: "done", ok: false, error: "Domain already exists" });
-      return;
+      const conflict = await buildDeployConflictInfo(existing, tpl);
+      if (!input.conflictAction) {
+        write({ type: "deploy_conflict", conflict });
+        write({
+          type: "done",
+          ok: false,
+          conflict: true,
+          error: `Site already exists for ${domain}. Choose how to continue.`,
+        });
+        return;
+      }
+      write({ type: "log", line: `Existing site: ${existing.id} — action: ${input.conflictAction}`, source: "stdout" });
+      if (input.conflictAction === "delete_and_redeploy") {
+        write({ type: "log", line: "Removing existing site record and stack…", source: "stdout" });
+        await deleteSiteForRedeploy(existing);
+      } else {
+        if (input.conflictAction === "reset_db_and_redeploy") {
+          const wipe = await resetSiteDatabase(existing, "wipe");
+          if (!wipe.ok) {
+            write({ type: "done", ok: false, error: wipe.error, siteId: existing.id });
+            return;
+          }
+          write({ type: "log", line: wipe.message, source: "stdout" });
+        } else if (input.conflictAction === "new_db_and_redeploy") {
+          const recreated = await resetSiteDatabase(existing, "recreate");
+          if (!recreated.ok) {
+            write({ type: "done", ok: false, error: recreated.error, siteId: existing.id });
+            return;
+          }
+          write({ type: "log", line: recreated.message, source: "stdout" });
+        }
+        write({ type: "step_complete", phase: "validate", code: 0 });
+        write({ type: "log", line: `Template: ${tpl.name} (${tpl.slug}) — redeploy on existing site`, source: "stdout" });
+        await runRedeployOnExistingSite(existing, tpl, input, write, phases, total, step);
+        return;
+      }
     }
     write({ type: "step_complete", phase: "validate", code: 0 });
     write({ type: "log", line: `Template: ${tpl.name} (${tpl.slug})`, source: "stdout" });
@@ -216,6 +261,7 @@ export async function runDeploySiteStream(input: DeployStreamInput, stream: Pass
     const stackWarnings = await provisionStackWithLogs(site, tpl, write, {
       /** App phase runs `apk add` with stack + recipe packages — avoid concurrent apk with fire-and-forget queue. */
       skipQueuedSidecarApk: !!appRecipe,
+      skipDockerDb: false,
     });
     for (const w of stackWarnings) write({ type: "log", line: `warn: ${w}`, source: "stderr" });
     write({ type: "step_complete", phase: "stack", code: 0 });
@@ -224,84 +270,12 @@ export async function runDeploySiteStream(input: DeployStreamInput, stream: Pass
 
     step++;
     write({ type: "phase", phase: "app", title: phases[4]!.title, index: step, total });
-    if (appRecipe) {
-      const sidecar = sidecarContainerName(working.id);
-      const st = getSidecarStatus(working.id);
-      if (st.state !== "running") {
-        write({ type: "log", line: "Sidecar not running — skipping app install", source: "stderr" });
-      } else {
-        let siteDirDockerUser: string | null = null;
-        try {
-          const st = await stat(rootPath);
-          siteDirDockerUser = formatDockerExecUser(st.uid, st.gid);
-        } catch {
-          siteDirDockerUser = null;
-        }
-        if (siteDirDockerUser) {
-          write({
-            type: "log",
-            line: `Running app install in sidecar as ${siteDirDockerUser} (site root owner)`,
-            source: "stdout",
-          });
-        }
-        const stack = sidecarStackFromSite(working);
-        const pkgs = new Set([...alpinePackagesForStack(stack), ...(appRecipe.extraAlpinePackages ?? [])]);
-        if (pkgs.size > 0) {
-          write({ type: "log", line: `Installing sidecar packages: ${[...pkgs].join(", ")}`, source: "stdout" });
-          const apkCode = await runSidecarStep(
-            write,
-            sidecar,
-            step,
-            total,
-            "apk",
-            "Install Alpine packages",
-            `apk add --no-cache ${[...pkgs].join(" ")}`,
-            600_000,
-            null,
-          );
-          if (apkCode !== 0) {
-            write({ type: "done", ok: false, error: "Sidecar package install failed", siteId: working.id });
-            return;
-          }
-        }
-        for (const s of appRecipe.steps) {
-          const code = await runSidecarStep(
-            write,
-            sidecar,
-            step,
-            total,
-            s.id,
-            s.title,
-            s.cmd,
-            900_000,
-            siteDirDockerUser,
-          );
-          if (code !== 0) {
-            write({ type: "done", ok: false, error: `App install failed: ${s.title}`, siteId: working.id });
-            return;
-          }
-        }
-        if (appRecipe.defaultDocument) {
-          const doc = sanitizeDefaultDocument(appRecipe.defaultDocument);
-          if (doc) {
-            working = await prisma.site.update({
-              where: { id: working.id },
-              data: { defaultDocument: doc },
-            });
-          }
-        }
-        await runStep(
-          write,
-          step,
-          total,
-          "chown",
-          "Fix site file ownership",
-          `sudo -n chown -R hostpanel:hostpanel '${rootPath.replace(/'/g, `'\\''`)}' || true`,
-          120_000,
-        );
-      }
-    } else {
-      write({ type: "log", line: "No bundled app installer for this template — stack only.", source: "stdout" });
+    try {
+      await runAppInstallPhase(working, tpl, rootPath, appRecipe, write, step, total);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      write({ type: "done", ok: false, error: msg, siteId: working.id });
+      return;
     }
     write({ type: "step_complete", phase: "app", code: 0 });
 
@@ -339,11 +313,197 @@ export async function runDeploySiteStream(input: DeployStreamInput, stream: Pass
   }
 }
 
+async function runRedeployOnExistingSite(
+  site: Site,
+  tpl: SiteTemplate,
+  input: DeployStreamInput,
+  write: WriteFn,
+  phases: { id: string; title: string }[],
+  total: number,
+  stepAfterValidate: number,
+): Promise<void> {
+  let step = stepAfterValidate;
+  await prisma.site.update({
+    where: { id: site.id },
+    data: { name: input.name, templateId: tpl.id, status: "pending" },
+  });
+  let working = (await prisma.site.findUnique({ where: { id: site.id } })) ?? site;
+  const rootPath = working.rootPath;
+
+  step++;
+  write({ type: "phase", phase: "site-row", title: "Update existing site", index: step, total });
+  write({ type: "log", line: `Reusing site id: ${working.id}`, source: "stdout" });
+  write({ type: "step_complete", phase: "site-row", code: 0 });
+
+  step++;
+  write({ type: "phase", phase: "files", title: phases[2]!.title, index: step, total });
+  const appRecipe = getAppInstallRecipe(tpl.slug);
+  try {
+    await provisionSiteDir(rootPath, { skipPlaceholderIndex: !!appRecipe });
+  } catch {
+    await runStep(
+      write,
+      step,
+      total,
+      "mkdir",
+      "Ensure site root exists",
+      `sudo -n mkdir -p '${rootPath.replace(/'/g, `'\\''`)}' && sudo -n chown hostpanel:hostpanel '${rootPath.replace(/'/g, `'\\''`)}'`,
+      60_000,
+    );
+  }
+  write({ type: "step_complete", phase: "files", code: 0 });
+
+  step++;
+  write({ type: "phase", phase: "stack", title: phases[3]!.title, index: step, total });
+  const skipDockerDb =
+    input.conflictAction === "reset_db_and_redeploy" || input.conflictAction === "new_db_and_redeploy";
+  const stackWarnings = await provisionStackWithLogs(working, tpl, write, {
+    skipQueuedSidecarApk: !!appRecipe,
+    skipDockerDb,
+  });
+  for (const w of stackWarnings) write({ type: "log", line: `warn: ${w}`, source: "stderr" });
+  write({ type: "step_complete", phase: "stack", code: 0 });
+
+  working = (await prisma.site.findUnique({ where: { id: working.id } })) ?? working;
+
+  step++;
+  write({ type: "phase", phase: "app", title: phases[4]!.title, index: step, total });
+  try {
+    await runAppInstallPhase(working, tpl, rootPath, appRecipe, write, step, total);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    write({ type: "done", ok: false, error: msg, siteId: working.id });
+    return;
+  }
+  write({ type: "step_complete", phase: "app", code: 0 });
+
+  step++;
+  write({ type: "phase", phase: "nginx", title: phases[5]!.title, index: step, total });
+  const fresh = await prisma.site.findUnique({ where: { id: working.id } });
+  if (!fresh) {
+    write({ type: "done", ok: false, error: "Site row missing" });
+    return;
+  }
+  try {
+    const configPath = await writeSiteConfig(fresh);
+    await prisma.site.update({
+      where: { id: working.id },
+      data: { webConfigPath: configPath, status: "active" },
+    });
+    await reloadWebServer(fresh.webServer as WebServerType);
+    write({ type: "log", line: `Vhost: ${configPath}`, source: "stdout" });
+    write({ type: "step_complete", phase: "nginx", code: 0 });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    write({ type: "done", ok: false, error: `Web config failed: ${msg}`, siteId: working.id });
+    return;
+  }
+
+  const finalSite = await prisma.site.findUnique({ where: { id: working.id } });
+  write({
+    type: "done",
+    ok: true,
+    siteId: working.id,
+    site: finalSite ?? fresh,
+    warnings: stackWarnings,
+  });
+}
+
+async function runAppInstallPhase(
+  working: Site,
+  tpl: SiteTemplate,
+  rootPath: string,
+  appRecipe: ReturnType<typeof getAppInstallRecipe>,
+  write: WriteFn,
+  step: number,
+  total: number,
+): Promise<void> {
+  if (!appRecipe) {
+    write({ type: "log", line: "No bundled app installer for this template — stack only.", source: "stdout" });
+    return;
+  }
+  const sidecar = sidecarContainerName(working.id);
+  const st = getSidecarStatus(working.id);
+  if (st.state !== "running") {
+    write({ type: "log", line: "Sidecar not running — skipping app install", source: "stderr" });
+    return;
+  }
+  let siteDirDockerUser: string | null = null;
+  try {
+    const stDir = await stat(rootPath);
+    siteDirDockerUser = formatDockerExecUser(stDir.uid, stDir.gid);
+  } catch {
+    siteDirDockerUser = null;
+  }
+  const stack = sidecarStackFromSite(working);
+  const pkgs = new Set([...alpinePackagesForStack(stack), ...(appRecipe.extraAlpinePackages ?? [])]);
+  if (pkgs.size > 0) {
+    const apkCode = await runSidecarStep(
+      write,
+      sidecar,
+      step,
+      total,
+      "apk",
+      "Install Alpine packages",
+      `apk add --no-cache ${[...pkgs].join(" ")}`,
+      600_000,
+      null,
+    );
+    if (apkCode !== 0) {
+      throw new Error("Sidecar package install failed");
+    }
+  }
+  for (const s of appRecipe.steps) {
+    const code = await runSidecarStep(
+      write,
+      sidecar,
+      step,
+      total,
+      s.id,
+      s.title,
+      s.cmd,
+      900_000,
+      siteDirDockerUser,
+    );
+    if (code !== 0) throw new Error(`App install failed: ${s.title}`);
+  }
+  if (appRecipe.defaultDocument) {
+    const doc = sanitizeDefaultDocument(appRecipe.defaultDocument);
+    if (doc) {
+      await prisma.site.update({ where: { id: working.id }, data: { defaultDocument: doc } });
+    }
+  }
+  await runStep(
+    write,
+    step,
+    total,
+    "chown",
+    "Fix site file ownership",
+    `sudo -n chown -R hostpanel:hostpanel '${rootPath.replace(/'/g, `'\\''`)}' || true`,
+    120_000,
+  );
+  const cmsProfile = shouldProvisionCmsAfterInstall(tpl) ? resolveCmsDbProfile(tpl.slug) : null;
+  if (cmsProfile) {
+    await runStep(
+      write,
+      step,
+      total,
+      "cms-db",
+      `CMS install prep (${cmsProfile})`,
+      `sudo -n /bin/bash /opt/hostpanel/scripts/provision-cms-install.sh '${rootPath.replace(/'/g, `'\\''`)}' '${cmsProfile.replace(/'/g, `'\\''`)}'`,
+      120_000,
+    );
+    if (await provisionCmsInstall(rootPath, cmsProfile)) {
+      write({ type: "log", line: `CMS database + installer permissions applied (${cmsProfile})`, source: "stdout" });
+    }
+  }
+}
+
 async function provisionStackWithLogs(
   site: Site,
   tpl: SiteTemplate,
   write: WriteFn,
-  opts?: { skipQueuedSidecarApk?: boolean },
+  opts?: { skipQueuedSidecarApk?: boolean; skipDockerDb?: boolean },
 ): Promise<string[]> {
   const flags = getEffectiveDeployFlags(tpl);
   const warnings: string[] = [];
@@ -364,42 +524,55 @@ async function provisionStackWithLogs(
     working = await prisma.site.update({ where: { id: working.id }, data: { networkGroup: ng } });
   }
 
-  if (flags.provisionDockerDb && working.networkGroup) {
-    write({ type: "log", line: "Starting Docker MySQL/MariaDB…", source: "stdout" });
-    const db = await ensureMysqlStackForSite({
+  const stackEngine = engineFromDbStackVersion(working.dbStackVersion);
+  if (flags.provisionDockerDb && stackEngine && !opts?.skipDockerDb) {
+    write({ type: "log", line: `Starting stack database (${stackEngine})…`, source: "stdout" });
+    const db = await ensureStackDbForSite({
       siteId: working.id,
-      networkGroupShort: working.networkGroup,
+      siteRootPath: working.rootPath,
+      networkGroupShort: working.networkGroup ?? `site-${working.id}`,
       dbStackVersion: working.dbStackVersion,
     });
     if (!db.ok) {
-      warnings.push(`Stack MySQL: ${db.error}`);
+      warnings.push(`Stack database: ${db.error}`);
       write({ type: "log", line: `DB error: ${db.error}`, source: "stderr" });
     } else {
-      working = await prisma.site.update({
-        where: { id: working.id },
-        data: { stackDbContainerId: db.containerId, stackDbHostPort: db.hostPort },
-      });
-      write({ type: "log", line: `Database listening on 127.0.0.1:${db.hostPort}`, source: "stdout" });
+      if (db.containerId) {
+        working = await prisma.site.update({
+          where: { id: working.id },
+          data: { stackDbContainerId: db.containerId, stackDbHostPort: db.hostPort },
+        });
+        write({ type: "log", line: `Database listening on 127.0.0.1:${db.hostPort}`, source: "stdout" });
+      } else {
+        write({ type: "log", line: `SQLite file: ${db.dbPath ?? db.dbName}`, source: "stdout" });
+      }
       try {
-        await prisma.siteDatabase.create({
-          data: {
-            siteId: working.id,
-            name: db.dbName,
-            engine: "mysql",
+        if (db.engine !== "sqlite") {
+          await prisma.siteDatabase.create({
+            data: {
+              siteId: working.id,
+              name: db.dbName,
+              engine: prismaDbEngine(db.engine),
+              host: "127.0.0.1",
+              port: db.hostPort,
+              username: db.dbUser,
+              passwordHash: await bcrypt.hash(db.dbPassword, 10),
+            },
+          });
+        }
+        await writeSiteDbEnvFile(
+          working.rootPath,
+          {
+            engine: db.engine,
             host: "127.0.0.1",
             port: db.hostPort,
+            database: db.dbName,
             username: db.dbUser,
-            passwordHash: await bcrypt.hash(db.dbPassword, 10),
+            password: db.dbPassword,
+            dbPath: db.dbPath,
           },
-        });
-        await writeSiteDbEnvFile(working.rootPath, {
-          engine: "mysql",
-          host: "127.0.0.1",
-          port: db.hostPort,
-          database: db.dbName,
-          username: db.dbUser,
-          password: db.dbPassword,
-        });
+          { siteId: working.id },
+        );
         write({ type: "log", line: "Wrote .hostpanel-db.env", source: "stdout" });
       } catch (e) {
         warnings.push(`SiteDatabase/env: ${e instanceof Error ? e.message : String(e)}`);

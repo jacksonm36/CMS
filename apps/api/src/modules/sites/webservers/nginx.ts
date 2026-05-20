@@ -51,6 +51,8 @@ export function generateConfig(site: Site, extras?: SiteWebConfigExtras): string
         fastcgi_index index.php;
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_read_timeout 600s;
+        fastcgi_param PHP_VALUE "max_execution_time=600\\nmax_input_time=600\\nmemory_limit=512M";
     }` : "";
 
   const proxyBlock =
