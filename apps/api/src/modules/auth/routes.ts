@@ -88,6 +88,12 @@ const adminUpdateUserSchema = z.object({
   message: "Provide at least one field to update",
 });
 
+const userIdParamsSchema = z.object({ id: z.string().cuid() });
+
+const deleteUserQuerySchema = z.object({
+  transferSitesTo: z.string().cuid().optional(),
+});
+
 const verifyTotpSchema = z.object({ code: z.string().length(6) });
 
 /** Single client-visible message for any failed credential check (avoid account/oracle leaks). */
@@ -301,7 +307,11 @@ export async function authRoutes(app: FastifyInstance) {
 
   // GET /api/auth/users/:id — single user (admin)
   app.get("/users/:id", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const params = userIdParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ success: false, error: "Invalid user id" });
+    }
+    const { id } = params.data;
     const actor = request.user as { sub: string; role: Role };
 
     const user = await prisma.user.findUnique({
@@ -486,7 +496,11 @@ export async function authRoutes(app: FastifyInstance) {
 
   // PATCH /api/auth/users/:id — admin updates any user
   app.patch("/users/:id", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const params = userIdParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ success: false, error: "Invalid user id" });
+    }
+    const { id } = params.data;
     const body = adminUpdateUserSchema.safeParse(request.body);
     if (!body.success) return reply.status(400).send({ success: false, error: body.error.issues[0]?.message ?? "Invalid request" });
 
@@ -553,8 +567,15 @@ export async function authRoutes(app: FastifyInstance) {
 
   // DELETE /api/auth/users/:id — admin deletes a user (?transferSitesTo=<userId> if they own sites)
   app.delete("/users/:id", { preHandler: requireRole("superadmin", "admin") }, async (request, reply) => {
-    const { id } = request.params as { id: string };
-    const query = request.query as { transferSitesTo?: string };
+    const params = userIdParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ success: false, error: "Invalid user id" });
+    }
+    const { id } = params.data;
+    const queryParsed = deleteUserQuerySchema.safeParse(request.query);
+    if (!queryParsed.success) {
+      return reply.status(400).send({ success: false, error: "Invalid transferSitesTo" });
+    }
     const actor = request.user as { sub: string; role: Role };
 
     if (id === actor.sub) {
@@ -580,7 +601,7 @@ export async function authRoutes(app: FastifyInstance) {
 
     const siteCount = await prisma.site.count({ where: { ownerId: id } });
     if (siteCount > 0) {
-      const transferTo = query.transferSitesTo?.trim();
+      const transferTo = queryParsed.data.transferSitesTo;
       if (!transferTo) {
         return reply.status(409).send({
           success: false,
