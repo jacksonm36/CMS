@@ -11,12 +11,73 @@ const SAFE_PROTOCOLS  = new Set(["tcp", "udp", "icmp", "all"]);
 const SAFE_DIRECTIONS = new Set(["inbound", "outbound"]);
 const SAFE_ACTIONS    = new Set(["allow", "block"]);
 
+/**
+ * Validate IPv4 address or CIDR notation.
+ * Checks both format and value ranges (0-255 per octet).
+ */
+function isValidIPv4(ip: string): boolean {
+  const parts = ip.split(".");
+  if (parts.length !== 4) return false;
+  return parts.every((part) => {
+    const num = parseInt(part, 10);
+    return !isNaN(num) && num >= 0 && num <= 255;
+  });
+}
+
+/**
+ * Validate IPv4 CIDR notation (e.g. 192.168.1.0/24).
+ * Checks IP validity and CIDR prefix (0-32).
+ */
+function isValidIPv4CIDR(cidr: string): boolean {
+  const parts = cidr.split("/");
+  if (parts.length === 1) {
+    // No CIDR suffix, just IP
+    return isValidIPv4(parts[0]!);
+  }
+  if (parts.length !== 2) return false;
+  const [ip, prefixStr] = parts;
+  const prefix = parseInt(prefixStr!, 10);
+  return isValidIPv4(ip!) && !isNaN(prefix) && prefix >= 0 && prefix <= 32;
+}
+
+/**
+ * Validate port number or port range (e.g. 80 or 8000:8100).
+ * Checks range 1-65535 per port.
+ */
+function isValidPort(port: string): boolean {
+  const parts = port.split(":");
+  if (parts.length === 0 || parts.length > 2) return false;
+  return parts.every((p) => {
+    const num = parseInt(p, 10);
+    return !isNaN(num) && num >= 1 && num <= 65535;
+  });
+}
+
 function validateRule(rule: FirewallRule): string | null {
   if (!SAFE_DIRECTIONS.has(rule.direction))        return `Invalid direction: ${rule.direction}`;
   if (!SAFE_PROTOCOLS.has(rule.protocol))          return `Invalid protocol: ${rule.protocol}`;
   if (!SAFE_ACTIONS.has(rule.action))              return `Invalid action: ${rule.action}`;
-  if (rule.sourceIp && !SAFE_IP_CIDR_RE.test(rule.sourceIp)) return `Invalid source IP/CIDR: ${rule.sourceIp}`;
-  if (rule.port     && !SAFE_PORT_RE.test(rule.port))         return `Invalid port/range: ${rule.port}`;
+  
+  // Enhanced IP validation: format + value ranges
+  if (rule.sourceIp) {
+    if (!SAFE_IP_CIDR_RE.test(rule.sourceIp)) {
+      return `Invalid source IP/CIDR format: ${rule.sourceIp}`;
+    }
+    if (!isValidIPv4CIDR(rule.sourceIp)) {
+      return `Invalid source IP/CIDR values (octets must be 0-255, prefix 0-32): ${rule.sourceIp}`;
+    }
+  }
+  
+  // Enhanced port validation: format + value ranges
+  if (rule.port) {
+    if (!SAFE_PORT_RE.test(rule.port)) {
+      return `Invalid port format: ${rule.port}`;
+    }
+    if (!isValidPort(rule.port)) {
+      return `Invalid port values (must be 1-65535): ${rule.port}`;
+    }
+  }
+  
   return null;
 }
 
